@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  # === Infraestructura ===
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: nexus_agent
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: nexus
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # === Agente (para producción) ===
+
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./plugins:/app/plugins  # Hot-reload de plugins
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  postgres_data:

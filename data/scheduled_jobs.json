@@ -1,0 +1,18 @@
+{
+  "daily_tech_summary_latam_ai": {
+    "id": "daily_tech_summary_latam_ai",
+    "name": "Resumen diario de noticias tech con enfoque en startups, IA y buenas noticias de América Latina",
+    "trigger_type": "cron",
+    "trigger_args": {
+      "hour": 20,
+      "minute": 25
+    },
+    "event_name": "task.execute",
+    "event_data": {
+      "instruction": "Usa news.search para buscar noticias recientes sobre tecnología, startups, IA y resalta buenas noticias de América Latina.",
+      "chat_id": 1714121336,
+      "channel": "telegram:1714121336"
+    },
+    "enabled": true
+  }
+}

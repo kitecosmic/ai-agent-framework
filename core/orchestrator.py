@@ -158,7 +158,7 @@ class Orchestrator(PluginBase):
         path.write_text(content, encoding="utf-8")
 
     def _update_profile_field(self, section: str, field_name: str, value: str) -> bool:
-        """Actualiza un campo específico en user_profile.md."""
+        """Actualiza un campo en user_profile.md. Si no existe, lo agrega a la sección."""
         path = DATA_DIR / "user_profile.md"
         if not path.exists():
             return False
@@ -166,15 +166,33 @@ class Orchestrator(PluginBase):
         lines = content.split("\n")
         new_lines = []
         in_section = False
+        section_end_idx = -1
         updated = False
-        for line in lines:
+
+        for i, line in enumerate(lines):
             if line.startswith("## "):
+                # Si estábamos en la sección correcta y no actualizamos, insertar antes de salir
+                if in_section and not updated:
+                    new_lines.append(f"- **{field_name}**: {value}")
+                    updated = True
                 in_section = line.strip().lower() == f"## {section.lower()}"
             if in_section and line.startswith(f"- **{field_name}**:"):
                 new_lines.append(f"- **{field_name}**: {value}")
                 updated = True
-            else:
-                new_lines.append(line)
+                continue
+            new_lines.append(line)
+
+        # Si la sección era la última y no se actualizó, agregar al final
+        if in_section and not updated:
+            new_lines.append(f"- **{field_name}**: {value}")
+            updated = True
+
+        # Si la sección no existe, crearla
+        if not updated:
+            new_lines.append(f"\n## {section}")
+            new_lines.append(f"- **{field_name}**: {value}")
+            updated = True
+
         if updated:
             path.write_text("\n".join(new_lines), encoding="utf-8")
         return updated
@@ -357,6 +375,11 @@ class Orchestrator(PluginBase):
 
                 if not clean:
                     clean = f"No pude procesar tu consulta correctamente. Intenta reformularla."
+
+                # Detectar info personal en mensajes donde el LLM no generó JSON plan
+                profile_msg = await self._detect_profile_info(instruction, channel)
+                if profile_msg:
+                    clean += profile_msg
 
                 return TaskResult(
                     success=True,
@@ -668,6 +691,63 @@ class Orchestrator(PluginBase):
                 logger.warning("orchestrator.fallback_summary_error", error=str(exc))
 
         return ""
+
+    async def _detect_profile_info(self, instruction: str, channel: str) -> str:
+        """Detecta info personal en mensajes del usuario y genera profile_update.
+
+        Se usa cuando el LLM no devolvió JSON (respondió texto plano)
+        pero el usuario compartió datos personales (equipo, gustos, etc).
+        Returns confirmation message to append, or empty string.
+        """
+        # Solo intentar si el mensaje es corto (info personal, no queries largos)
+        if len(instruction) > 200:
+            return ""
+        try:
+            extract_msgs = [
+                LLMMessage(role="system", content=(
+                    "Analiza el mensaje del usuario y extrae información personal si la hay. "
+                    "Responde SOLO con JSON. Si NO hay info personal, responde: {}\n"
+                    "Si hay info, responde con: "
+                    '{"updates": [{"field": "NombreCampo", "value": "valor", "section": "Sección"}]}\n'
+                    "Secciones válidas: Personal, Location, Preferences, Notes\n"
+                    "Ejemplos de campos: Nationality, Football Team, Hobbies, Favorite Music, Birthday, etc.\n"
+                    "SOLO JSON, sin texto extra."
+                )),
+                LLMMessage(role="user", content=instruction),
+            ]
+            resp = await self.llm.complete(extract_msgs, temperature=0.1)
+            clean = re.sub(r"<think>.*?</think>", "", resp.content, flags=re.DOTALL).strip()
+
+            # Extraer JSON
+            match = re.search(r'\{.*\}', clean, re.DOTALL)
+            if not match:
+                return ""
+            data = json.loads(match.group())
+            updates = data.get("updates", [])
+            if not updates:
+                return ""
+
+            parts = []
+            for upd in updates:
+                field = upd.get("field", "")
+                value = upd.get("value", "")
+                section = upd.get("section", "Personal")
+                if field and value:
+                    self._pending_profile_updates[channel] = {
+                        "field": field,
+                        "value": value,
+                        "section": section,
+                    }
+                    parts.append(f"**{field}** = {value}")
+                    logger.info("orchestrator.profile_detected_no_plan", field=field, value=value)
+                    break  # Uno a la vez para confirmación
+
+            if parts:
+                return f"\n\n💾 Detecté info nueva: {', '.join(parts)}. ¿Querés que lo guarde en tu perfil? Respondé 'sí' o 'no'."
+            return ""
+        except Exception as exc:
+            logger.debug("orchestrator.profile_detect_error", error=str(exc))
+            return ""
 
     @staticmethod
     def _clean_response(text: str) -> str:

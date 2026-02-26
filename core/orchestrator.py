@@ -355,18 +355,28 @@ class Orchestrator(PluginBase):
                 llm_response = await self.llm.complete(messages, temperature=0.5)
                 plan = self._parse_plan(llm_response.content)
 
+            clean = ""
             if not plan:
                 # Limpiar respuesta: quitar <think> tags y JSON residual
                 clean = llm_response.content.strip()
                 logger.debug("orchestrator.no_plan_raw", raw_length=len(clean), raw_preview=clean[:200])
                 clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
-                # Si parece JSON pero no se parseó, extraer solo el "response"
+                # Si parece JSON pero _parse_plan falló, intentar reparar y ejecutar
                 if clean.startswith("{"):
+                    obj = None
                     try:
                         obj = json.loads(clean)
-                        clean = obj.get("response", clean)
                     except json.JSONDecodeError:
-                        pass
+                        obj = self._try_repair_json(clean)
+                    if isinstance(obj, dict) and obj.get("steps"):
+                        # Recuperamos un plan válido — ejecutar en vez de descartar
+                        logger.info("orchestrator.recovered_plan_from_no_plan", steps=len(obj["steps"]))
+                        plan = obj
+                    elif isinstance(obj, dict):
+                        clean = obj.get("response", clean)
+
+            # Si recuperamos un plan, no retornar aquí — caer al bloque de ejecución
+            if not plan:
                 logger.debug("orchestrator.no_plan_clean", clean_length=len(clean), clean_preview=clean[:200])
 
                 # Si la respuesta quedó vacía (solo había <think> tags), ejecutar directamente como búsqueda
@@ -777,6 +787,59 @@ class Orchestrator(PluginBase):
 
         return text
 
+    @staticmethod
+    def _try_repair_json(text: str) -> dict | None:
+        """Intenta reparar JSON malformado de LLMs.
+
+        Errores comunes:
+        - steps array con "description" fuera del objeto step:
+          [{"event":"x","data":{}}, "description": "y"]
+          → [{"event":"x","data":{},"description":"y"}]
+        - Trailing commas
+        - Single quotes instead of double quotes
+        """
+        try:
+            # Fix 1: trailing commas antes de } o ]
+            fixed = re.sub(r',\s*([}\]])', r'\1', text)
+            obj = json.loads(fixed)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            # Fix 2: "description" fuera del step object en steps array
+            # Pattern: }, "description": "..."] → , "description": "..."}]
+            fixed = re.sub(
+                r'\}\s*,\s*"description"\s*:\s*"([^"]*?)"\s*\]',
+                r', "description": "\1"}]',
+                text,
+            )
+            # También manejar múltiples steps con el mismo problema
+            fixed = re.sub(
+                r'\}\s*,\s*"description"\s*:\s*"([^"]*?)"\s*,\s*\{',
+                r', "description": "\1"}, {',
+                fixed,
+            )
+            fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+            obj = json.loads(fixed)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            # Fix 3: single quotes → double quotes (last resort)
+            fixed = text.replace("'", '"')
+            fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+            obj = json.loads(fixed)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+
+        return None
+
     def _parse_plan(self, content: str) -> dict | None:
         """
         Intenta parsear el JSON del plan del LLM.
@@ -815,7 +878,10 @@ class Orchestrator(PluginBase):
                         if isinstance(obj, dict):
                             json_objects.append(obj)
                     except json.JSONDecodeError:
-                        pass
+                        # Intentar reparar errores comunes de LLMs
+                        repaired = self._try_repair_json(candidate)
+                        if repaired and isinstance(repaired, dict):
+                            json_objects.append(repaired)
                     start_idx = None
 
         if not json_objects:

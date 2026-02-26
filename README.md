@@ -32,7 +32,7 @@
 - **LLM**: Anthropic Claude / OpenAI (pluggable)
 - **Messaging Bridge**: WebSocket + Webhooks (listo para tu app)
 
-## Quick Start
+## Quick Start (Local)
 
 ```bash
 # 1. Instalar dependencias
@@ -42,11 +42,28 @@ playwright install chromium
 # 2. Configurar variables de entorno
 cp .env.example .env
 
-# 3. Levantar servicios
-docker-compose up -d redis postgres
+# 3. Ejecutar el agente
+python main.py
+```
 
-# 4. Ejecutar el agente
-python -m core.main
+## Deploy en GPU / Servidor
+
+```bash
+# Primera vez:
+git clone https://github.com/kitecosmic/ai-agent-framework.git
+cd ai-agent-framework
+bash setup.sh
+nano .env                # configurar tokens y modelo
+systemctl start nexus-agent
+
+# Actualizar (después de git push desde tu PC):
+cd ~/ai-agent-framework && git pull && systemctl restart nexus-agent
+
+# Parar (para volver a desarrollar en local):
+systemctl stop nexus-agent
+
+# Ver logs:
+journalctl -u nexus-agent -f
 ```
 
 ## Crear un Plugin Custom

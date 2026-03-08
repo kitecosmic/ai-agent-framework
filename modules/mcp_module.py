@@ -232,36 +232,39 @@ class MCPModule(PluginBase):
             logger.warning("mcp.no_command", server=name)
             return
 
-        # Resolver path completo del comando (npx, node, etc.)
-        # systemd puede tener un PATH limitado, así que buscamos en paths comunes también
-        resolved_command = shutil.which(command)
-        if not resolved_command:
-            # Buscar en paths comunes que systemd podría no tener
-            common_paths = [
-                "/usr/local/bin", "/usr/bin", "/bin",
-                "/usr/local/lib/nodejs/bin",
-                os.path.expanduser("~/.nvm/versions/node"),
-                "/snap/bin",
-            ]
-            for p in common_paths:
-                candidate = os.path.join(p, command)
-                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                    resolved_command = candidate
-                    break
+        # Construir environment con PATH completo del sistema
+        # systemd tiene PATH limitado, así que forzamos el PATH estándar completo
+        env = {**os.environ, **env_vars}
+        full_system_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+        venv_path = env.get("PATH", "")
+        env["PATH"] = f"{venv_path}:{full_system_path}" if venv_path else full_system_path
 
+        # Resolver path completo del comando usando el PATH ampliado
+        resolved_command = shutil.which(command, path=env["PATH"])
         if resolved_command:
             logger.info("mcp.resolved_command", original=command, resolved=resolved_command)
             command = resolved_command
         else:
-            logger.warning("mcp.command_not_found", command=command, hint="Verificá que esté instalado y en el PATH")
-
-        # Construir environment con PATH ampliado
-        env = {**os.environ, **env_vars}
-        # Asegurar que /usr/local/bin y /usr/bin estén en el PATH del subprocess
-        current_path = env.get("PATH", "")
-        extra_paths = "/usr/local/bin:/usr/bin:/bin:/snap/bin"
-        if extra_paths not in current_path:
-            env["PATH"] = f"{extra_paths}:{current_path}"
+            # Último intento: subprocess which
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "/usr/bin/env", "which", command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+                found = stdout.decode().strip()
+                if found and os.path.isfile(found):
+                    command = found
+                    logger.info("mcp.resolved_via_subprocess", command=command)
+                else:
+                    logger.warning("mcp.command_not_found", command=command,
+                                   path=env["PATH"][:200],
+                                   hint="Verificá que esté instalado. Podés usar path completo en MCP_SERVERS config.")
+            except Exception:
+                logger.warning("mcp.command_not_found", command=command,
+                               hint="Verificá que esté instalado y en el PATH")
 
         params = StdioServerParameters(
             command=command,

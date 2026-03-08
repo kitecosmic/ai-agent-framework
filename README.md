@@ -57,7 +57,7 @@ nano .env                # configurar tokens y modelo
 systemctl start nexus-agent
 
 # Actualizar (después de git push desde tu PC):
-cd ~/ai-agent-framework && git pull && systemctl restart nexus-agent
+cd ~/ai-agent-framework && git pull && source venv/bin/activate && pip install -q -r requirements.txt && systemctl restart nexus-agent
 
 # Parar (para volver a desarrollar en local):
 systemctl stop nexus-agent

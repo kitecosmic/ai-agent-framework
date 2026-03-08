@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -91,7 +92,7 @@ class SystemModule(PluginBase):
     async def exec_command(self, event: Event) -> dict[str, Any]:
         """Ejecuta un comando shell y retorna stdout/stderr."""
         command = event.data.get("command", "")
-        cwd = event.data.get("cwd", str(self._allowed_root))
+        cwd = os.path.expanduser(event.data.get("cwd", str(self._allowed_root)))
         timeout = event.data.get("timeout", self._command_timeout)
 
         if not command.strip():
@@ -157,7 +158,7 @@ class SystemModule(PluginBase):
         if not file_path:
             return {"success": False, "error": "Path vacío"}
 
-        path = Path(file_path).resolve()
+        path = Path(os.path.expanduser(file_path)).resolve()
         if not self._is_path_allowed(path):
             return {"success": False, "error": f"Path no permitido: {file_path}"}
 
@@ -192,7 +193,7 @@ class SystemModule(PluginBase):
         if not file_path:
             return {"success": False, "error": "Path vacío"}
 
-        path = Path(file_path).resolve()
+        path = Path(os.path.expanduser(file_path)).resolve()
         if not self._is_path_allowed(path):
             return {"success": False, "error": f"Path no permitido: {file_path}"}
 
@@ -226,7 +227,7 @@ class SystemModule(PluginBase):
         recursive = event.data.get("recursive", False)
         max_items = event.data.get("max_items", 100)
 
-        path = Path(dir_path).resolve()
+        path = Path(os.path.expanduser(dir_path)).resolve()
         if not self._is_path_allowed(path):
             return {"success": False, "error": f"Path no permitido: {dir_path}"}
 
@@ -269,7 +270,7 @@ class SystemModule(PluginBase):
         if not re.match(r'^[a-zA-Z0-9_\-\.\[\]]+([<>=!]+[a-zA-Z0-9_\-\.]+)?$', package):
             return {"success": False, "error": f"Nombre de paquete inválido: {package}"}
 
-        command = f"pip install {package}"
+        command = f"{sys.executable} -m pip install {package}"
         logger.info("system.pip_install", package=package)
 
         # Reusar exec_command

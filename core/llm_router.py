@@ -80,7 +80,17 @@ class AnthropicProvider(LLMProvider):
             if msg.role == "system":
                 system = msg.content
             else:
-                api_messages.append({"role": msg.role, "content": msg.content})
+                # Detectar mensajes con imagen (formato __IMAGE_CONTENT__:JSON)
+                content = msg.content
+                if isinstance(content, str) and content.startswith("__IMAGE_CONTENT__:"):
+                    import json as _json
+                    try:
+                        blocks = _json.loads(content[len("__IMAGE_CONTENT__:"):])
+                        api_messages.append({"role": msg.role, "content": blocks})
+                    except Exception:
+                        api_messages.append({"role": msg.role, "content": content})
+                else:
+                    api_messages.append({"role": msg.role, "content": content})
 
         params: dict[str, Any] = {
             "model": model or self.default_model,
@@ -113,7 +123,16 @@ class AnthropicProvider(LLMProvider):
             if msg.role == "system":
                 system = msg.content
             else:
-                api_messages.append({"role": msg.role, "content": msg.content})
+                content = msg.content
+                if isinstance(content, str) and content.startswith("__IMAGE_CONTENT__:"):
+                    import json as _json
+                    try:
+                        blocks = _json.loads(content[len("__IMAGE_CONTENT__:"):])
+                        api_messages.append({"role": msg.role, "content": blocks})
+                    except Exception:
+                        api_messages.append({"role": msg.role, "content": content})
+                else:
+                    api_messages.append({"role": msg.role, "content": content})
 
         params: dict[str, Any] = {
             "model": model or self.default_model,
@@ -191,6 +210,64 @@ class OllamaProvider(LLMProvider):
         self.client = AsyncOpenAI(
             api_key="ollama",  # Ollama no requiere API key real
             base_url=f"{base_url}/v1",
+        )
+        self.default_model = default_model
+
+    async def complete(
+        self,
+        messages: list[LLMMessage],
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        tools: list[dict] | None = None,
+        **kwargs,
+    ) -> LLMResponse:
+        api_messages = [{"role": m.role, "content": m.content} for m in messages]
+
+        params: dict[str, Any] = {
+            "model": model or self.default_model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": api_messages,
+        }
+        if tools:
+            params["tools"] = tools
+
+        response = await self.client.chat.completions.create(**params)
+        choice = response.choices[0]
+
+        return LLMResponse(
+            content=choice.message.content or "",
+            model=response.model,
+            provider=self.name,
+            usage={
+                "input_tokens": response.usage.prompt_tokens if response.usage else 0,
+                "output_tokens": response.usage.completion_tokens if response.usage else 0,
+            },
+            raw=response,
+        )
+
+    async def stream(self, messages: list[LLMMessage], model: str | None = None, **kwargs) -> AsyncIterator[str]:
+        api_messages = [{"role": m.role, "content": m.content} for m in messages]
+        stream = await self.client.chat.completions.create(
+            model=model or self.default_model,
+            messages=api_messages,
+            stream=True,
+        )
+        async for chunk in stream:
+            if chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
+
+class MinimaxProvider(LLMProvider):
+    """Provider para MiniMax (compatible con OpenAI API)."""
+    name = "minimax"
+
+    def __init__(self, api_key: str, default_model: str = "MiniMax-Text-01"):
+        from openai import AsyncOpenAI
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url="https://api.minimaxi.chat/v1",
         )
         self.default_model = default_model
 

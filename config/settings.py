@@ -27,13 +27,26 @@ class Settings(BaseSettings):
     # ── Redis ────────────────────────────────────────────
     redis_url: str = "redis://localhost:6379/0"
 
-    # ── LLM ──────────────────────────────────────────────
+    # ── LLM Principal ────────────────────────────────────
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "deepseek-r1:14b"
     default_llm_provider: str = "ollama"
     default_llm_model: str = "deepseek-r1:14b"
+
+    # ── Multi-Model Routing (modelos especializados) ──────
+    # El agente elige automáticamente el mejor modelo según la tarea
+    model_routing_enabled: bool = True
+    ollama_vision_model: str = "qwen3-vl:32b"       # Fotos, imágenes, video
+    ollama_coding_model: str = "qwen3-coder:latest"  # Código, debugging, programación
+    ollama_reasoning_model: str = "deepseek-r1:14b"  # Análisis profundo, razonamiento
+    ollama_ocr_model: str = "glm-ocr:latest"         # Extraer texto de imágenes
+    ollama_fast_model: str = "phi4-mini:latest"       # Respuestas rápidas y simples
+
+    # ── MiniMax ──────────────────────────────────────────
+    minimax_api_key: str = ""
+    minimax_model: str = "MiniMax-Text-01"
 
     # ── Browser ──────────────────────────────────────────
     browser_headless: bool = True
@@ -53,6 +66,28 @@ class Settings(BaseSettings):
     system_command_timeout: int = 30
     system_max_output: int = 10000
 
+    # ── Admin & Seguridad ─────────────────────────────────
+    # Chat IDs de Telegram con acceso de administrador (comma-separated)
+    # Admins pueden usar /config para configurar el agente sin tocar la terminal
+    admin_chat_ids: str = ""
+
+    # ── RapiBase (github.com/kitecosmic/rapibase) ────────
+    rapibase_url: str = ""
+    # Service Key: acceso total sin JWT (para el agente / backend)
+    rapibase_service_key: str = ""
+    # Anon Key: acceso público (requiere JWT del usuario)
+    rapibase_anon_key: str = ""
+    # Alias retrocompatible — se usa como service key si está configurado
+    rapibase_api_key: str = ""
+
+    # ── Audio / Transcripción de voz ─────────────────────
+    # Providers: "faster_whisper" (local, recomendado) | "openai" | "ollama"
+    audio_transcription_provider: str = "faster_whisper"
+    # Modelos faster-whisper: tiny, base, small, medium, large-v3, turbo (recomendado)
+    faster_whisper_model: str = "turbo"
+    faster_whisper_device: str = "auto"  # "auto" | "cpu" | "cuda"
+    ollama_whisper_model: str = "whisper"  # fallback si usás ollama provider
+
     # ── MCP ────────────────────────────────────────────────
     mcp_servers: str = ""  # JSON array of server configs
 
@@ -63,6 +98,15 @@ class Settings(BaseSettings):
     # ── Logging ──────────────────────────────────────────
     log_level: str = "INFO"
     log_format: str = "json"
+
+    def get_admin_chat_ids(self) -> list[int]:
+        """Retorna lista de chat IDs de administradores."""
+        if not self.admin_chat_ids:
+            return []
+        try:
+            return [int(x.strip()) for x in self.admin_chat_ids.split(",") if x.strip()]
+        except ValueError:
+            return []
 
 
 @lru_cache

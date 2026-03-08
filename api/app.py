@@ -33,7 +33,7 @@ from pydantic import BaseModel
 
 from config.settings import get_settings
 from core.event_bus import Event, event_bus
-from core.llm_router import AnthropicProvider, OpenAIProvider, OllamaProvider, llm_router
+from core.llm_router import AnthropicProvider, OpenAIProvider, OllamaProvider, MinimaxProvider, llm_router
 from core.orchestrator import Orchestrator
 from core.plugin_base import PluginRegistry
 
@@ -47,6 +47,8 @@ from modules.multi_tenancy import MultiTenancyModule
 from modules.telegram_bridge import TelegramBridge
 from modules.system_module import SystemModule
 from modules.mcp_module import MCPModule
+from modules.audio_module import AudioModule
+from modules.rapibase_module import RapibaseModule
 
 logger = structlog.get_logger()
 
@@ -88,6 +90,16 @@ async def lifespan(app: FastAPI):
             default=settings.default_llm_provider == "ollama",
         )
 
+    # MiniMax (para usuarios con Coding Plan)
+    if settings.minimax_api_key:
+        llm_router.add_provider(
+            MinimaxProvider(
+                api_key=settings.minimax_api_key,
+                default_model=settings.minimax_model,
+            ),
+            default=settings.default_llm_provider == "minimax",
+        )
+
     config = settings.model_dump()
 
     # 2. Registrar módulos built-in
@@ -100,6 +112,8 @@ async def lifespan(app: FastAPI):
     await registry.register(TelegramBridge, config)
     await registry.register(SystemModule, config)
     await registry.register(MCPModule, config)
+    await registry.register(AudioModule, config)
+    await registry.register(RapibaseModule, config)
     await registry.register(Orchestrator, config)
 
     # 2.5 Agregar middleware de rate limiting

@@ -11,13 +11,16 @@ para la app de mensajería propia.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 import structlog
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -28,6 +31,108 @@ from core.event_bus import Event, event_bus
 from core.plugin_base import PluginBase, hook
 
 logger = structlog.get_logger()
+
+# ── /config wizard: pasos y validaciones ────────────────────────────
+CONFIG_STEPS = [
+    {
+        "key": "ANTHROPIC_API_KEY",
+        "label": "Anthropic API Key",
+        "hint": "Empieza con sk-ant-...",
+        "validate": lambda v: v.startswith("sk-ant-") and len(v) > 20,
+        "mask": True,
+    },
+    {
+        "key": "OPENAI_API_KEY",
+        "label": "OpenAI API Key",
+        "hint": "Empieza con sk-...",
+        "validate": lambda v: v.startswith("sk-") and len(v) > 10,
+        "mask": True,
+    },
+    {
+        "key": "MINIMAX_API_KEY",
+        "label": "MiniMax API Key",
+        "hint": "Para usuarios con Coding Plan",
+        "validate": lambda v: len(v) > 5,
+        "mask": True,
+    },
+    {
+        "key": "RAPIBASE_URL",
+        "label": "RapiBase URL",
+        "hint": "Ej: https://tuapp.rapibase.io",
+        "validate": lambda v: v.startswith("http"),
+        "mask": False,
+    },
+    {
+        "key": "RAPIBASE_SERVICE_KEY",
+        "label": "RapiBase Service Key",
+        "hint": "Acceso total sin JWT (para el agente/backend)",
+        "validate": lambda v: len(v) > 3,
+        "mask": True,
+    },
+    {
+        "key": "RAPIBASE_ANON_KEY",
+        "label": "RapiBase Anon Key",
+        "hint": "Acceso público (requiere JWT del usuario)",
+        "validate": lambda v: len(v) > 3,
+        "mask": True,
+    },
+    {
+        "key": "DEFAULT_LLM_PROVIDER",
+        "label": "Provider de IA por defecto",
+        "hint": "ollama | anthropic | openai | minimax",
+        "validate": lambda v: v in ("ollama", "anthropic", "openai", "minimax"),
+        "mask": False,
+    },
+    {
+        "key": "OLLAMA_MODEL",
+        "label": "Modelo Ollama por defecto",
+        "hint": "Ej: qwen3-coder:latest, deepseek-r1:14b",
+        "validate": lambda v: len(v) > 2,
+        "mask": False,
+    },
+]
+
+
+def _update_env_value(key: str, value: str) -> bool:
+    """Actualiza o agrega un valor en .env de forma segura."""
+    env_path = Path(".env")
+    if not env_path.exists():
+        env_path.write_text(f"{key}={value}\n", encoding="utf-8")
+        return True
+
+    content = env_path.read_text(encoding="utf-8")
+    lines = content.splitlines(keepends=True)
+    updated = False
+    new_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(f"{key}=") or stripped.startswith(f"# {key}="):
+            new_lines.append(f"{key}={value}\n")
+            updated = True
+        else:
+            new_lines.append(line)
+
+    if not updated:
+        new_lines.append(f"\n{key}={value}\n")
+
+    env_path.write_text("".join(new_lines), encoding="utf-8")
+
+    # Invalidar cache de settings
+    try:
+        from config.settings import get_settings
+        get_settings.cache_clear()
+    except Exception:
+        pass
+
+    return True
+
+
+def _mask_value(value: str) -> str:
+    """Enmascara un valor sensible para mostrar al usuario."""
+    if len(value) <= 8:
+        return "****"
+    return value[:4] + "..." + value[-4:]
 
 
 class TelegramBridge(PluginBase):
@@ -57,12 +162,21 @@ class TelegramBridge(PluginBase):
         self._token: str = ""
         self._polling_task: asyncio.Task | None = None
         self._chat_contexts: dict[int, list[dict]] = {}  # chat_id -> conversation
+        self._admin_ids: list[int] = []
+        self._config_sessions: dict[int, dict] = {}  # chat_id -> {step_key, step_index}
 
     async def on_load(self):
         self._token = self.config.get("telegram_bot_token", "")
         if not self._token:
             logger.warning("telegram.no_token", hint="Set TELEGRAM_BOT_TOKEN in .env")
             return
+
+        # Cargar admin IDs
+        from config.settings import get_settings
+        s = get_settings()
+        self._admin_ids = s.get_admin_chat_ids()
+        if not self._admin_ids:
+            logger.warning("telegram.no_admin_ids", hint="Agregá ADMIN_CHAT_IDS en .env para usar /config")
 
         # Construir la app de Telegram
         self._app = (
@@ -77,14 +191,26 @@ class TelegramBridge(PluginBase):
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("jobs", self._cmd_jobs))
         self._app.add_handler(CommandHandler("removejob", self._cmd_removejob))
+        self._app.add_handler(CommandHandler("config", self._cmd_config))
+        self._app.add_handler(CommandHandler("trust", self._cmd_trust))
+        self._app.add_handler(CommandHandler("model", self._cmd_model))
+        self._app.add_handler(CallbackQueryHandler(self._handle_callback))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
+        )
+        # Voz y audio
+        self._app.add_handler(
+            MessageHandler(filters.VOICE | filters.AUDIO, self._handle_voice)
+        )
+        # Fotos e imágenes
+        self._app.add_handler(
+            MessageHandler(filters.PHOTO, self._handle_photo)
         )
 
         # Iniciar polling en background
         self._polling_task = asyncio.create_task(self._run_polling())
 
-        logger.info("telegram.loaded", bot_token=f"...{self._token[-6:]}")
+        logger.info("telegram.loaded", bot_token=f"...{self._token[-6:]}", admins=self._admin_ids)
 
     async def on_unload(self):
         if self._polling_task:
@@ -138,21 +264,43 @@ class TelegramBridge(PluginBase):
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Comando /help — capacidades."""
-        await update.message.reply_text(
-            "📋 *Comandos disponibles:*\n\n"
-            "/start — Mensaje de bienvenida\n"
-            "/help — Esta ayuda\n"
-            "/status — Estado del agente\n"
-            "/jobs — Ver tareas programadas\n"
-            "/removejob <id> — Eliminar tarea programada\n\n"
-            "📝 *Ejemplos de uso:*\n\n"
-            '• "Busca información sobre Python 3.12"\n'
-            '• "¿Cuál es el clima en Buenos Aires?"\n'
-            '• "Monitorea el precio de este producto: [URL]"\n'
-            '• "Haz un request GET a https://api.example.com/data"\n\n'
-            "Simplemente escribe tu consulta en lenguaje natural.",
-            parse_mode="Markdown",
-        )
+        chat_id = update.effective_chat.id
+        is_admin = self._is_admin(chat_id)
+
+        lines = [
+            "📋 *Comandos disponibles:*\n",
+            "/start — Mensaje de bienvenida",
+            "/help — Esta ayuda",
+            "/status — Estado del agente",
+            "/model — Ver modelos de IA configurados",
+            "/jobs — Ver tareas programadas",
+            "/removejob <id> — Eliminar tarea programada",
+        ]
+
+        if is_admin:
+            lines += [
+                "",
+                "🔧 *Comandos de administrador:*",
+                "/config — Configurar API keys y opciones (sin tocar la terminal)",
+                "/trust on|off — Activar/desactivar auto-aprobación de comandos del sistema",
+            ]
+
+        lines += [
+            "",
+            "💡 *Capacidades:*",
+            "• Responde preguntas y razona con IA",
+            "• Navega y extrae datos de la web",
+            "• Entiende fotos e imágenes",
+            "• Transcribe mensajes de voz a texto",
+            "• Crea y gestiona bases de datos con RapiBase",
+            "• Programa tareas automáticas",
+            "• Ejecuta comandos del sistema",
+            "• Crea subdominios en Cloudflare",
+            "",
+            "_Podés agregar nuevas habilidades creando plugins Python en la carpeta plugins/_",
+        ]
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Comando /status — estado del agente."""
@@ -217,6 +365,198 @@ class TelegramBridge(PluginBase):
             await update.message.reply_text(f"❌ Error eliminando tarea: {str(exc)}")
             logger.error("telegram.removejob_error", job_id=job_id, error=str(exc))
 
+    # ── /config wizard (solo admins) ─────────────────────────────
+
+    def _is_admin(self, chat_id: int) -> bool:
+        return chat_id in self._admin_ids
+
+    async def _cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Wizard de configuración seguro — solo para admins."""
+        chat_id = update.effective_chat.id
+
+        if not self._is_admin(chat_id):
+            await update.message.reply_text(
+                "🔒 Este comando es solo para administradores.\n\n"
+                "Para habilitarte, tu chat ID debe estar en `ADMIN_CHAT_IDS` del `.env`.\n"
+                f"Tu chat ID es: `{chat_id}`",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Mostrar menú de configuración con botones
+        keyboard = []
+        for i, step in enumerate(CONFIG_STEPS):
+            keyboard.append([InlineKeyboardButton(
+                f"⚙️ {step['label']}", callback_data=f"cfg:{i}"
+            )])
+        keyboard.append([InlineKeyboardButton("❌ Cancelar", callback_data="cfg:cancel")])
+
+        await update.message.reply_text(
+            "🛠️ *Configuración del Agente*\n\n"
+            "Seleccioná qué querés configurar:\n"
+            "_(Los valores se guardan en `.env` automáticamente)_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Maneja los botones del wizard de configuración."""
+        query = update.callback_query
+        chat_id = query.from_user.id
+        await query.answer()
+
+        if not query.data.startswith("cfg:"):
+            return
+
+        data = query.data[4:]
+
+        if data == "cancel":
+            self._config_sessions.pop(chat_id, None)
+            await query.edit_message_text("❌ Configuración cancelada.")
+            return
+
+        try:
+            step_idx = int(data)
+        except ValueError:
+            return
+
+        if step_idx < 0 or step_idx >= len(CONFIG_STEPS):
+            return
+
+        step = CONFIG_STEPS[step_idx]
+        self._config_sessions[chat_id] = {"step_idx": step_idx, "step": step}
+
+        await query.edit_message_text(
+            f"⚙️ *{step['label']}*\n\n"
+            f"_{step['hint']}_\n\n"
+            f"Enviá el nuevo valor (o /cancelconfig para cancelar):",
+            parse_mode="Markdown",
+        )
+
+    async def _cmd_config_value(self, chat_id: int, text: str) -> bool:
+        """
+        Procesa el valor enviado durante el wizard /config.
+        Retorna True si estaba en sesión de config, False si no.
+        """
+        if chat_id not in self._config_sessions:
+            return False
+
+        session = self._config_sessions.pop(chat_id)
+        step = session["step"]
+
+        # Validar formato del valor
+        value = text.strip()
+        if step["validate"] and not step["validate"](value):
+            await self._send_long_message(
+                chat_id,
+                f"❌ Valor inválido para *{step['label']}*.\n"
+                f"Formato esperado: {step['hint']}\n\n"
+                f"Usá /config para intentarlo de nuevo.",
+            )
+            return True
+
+        # Guardar en .env
+        try:
+            _update_env_value(step["key"], value)
+            display = _mask_value(value) if step["mask"] else value
+            await self._send_long_message(
+                chat_id,
+                f"✅ *{step['label']}* guardado: `{display}`\n\n"
+                f"Usá /config para configurar otro valor.\n"
+                f"_El agente usará el nuevo valor en el próximo reinicio._",
+            )
+            logger.info("telegram.config_saved", key=step["key"], admin=chat_id)
+        except Exception as exc:
+            await self._send_long_message(chat_id, f"❌ Error guardando: {exc}")
+
+        return True
+
+    # ── /trust command ───────────────────────────────────────────
+
+    async def _cmd_trust(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Activa/desactiva el modo de confianza para comandos del sistema.
+        Con trust ON, el agente ejecuta rm y comandos peligrosos sin pedir confirmación.
+        Con trust OFF (default), siempre pide confirmación.
+        """
+        chat_id = update.effective_chat.id
+        if not self._is_admin(chat_id):
+            await update.message.reply_text("🔒 Solo para administradores.")
+            return
+
+        channel = f"telegram:{chat_id}"
+        args = context.args or []
+        mode = args[0].lower() if args else None
+
+        if mode == "off":
+            enable = False
+        elif mode == "on":
+            enable = True
+        else:
+            # Toggle
+            results = await event_bus.emit(Event(
+                name="system.set_trust",
+                data={"channel": channel, "enable": True},
+                source="telegram",
+            ))
+            # Verificar estado actual via toggle inverso — simplemente toggle
+            # (leer del orchestrator es complejo, así que usamos el estado del mensaje)
+            await update.message.reply_text(
+                "⚠️ *Modo Trust — Comandos del sistema*\n\n"
+                "Usá:\n"
+                "• `/trust on` — El agente ejecuta comandos `rm` y operaciones peligrosas *sin pedir confirmación*\n"
+                "• `/trust off` — Vuelve a pedir confirmación (recomendado)\n\n"
+                "Estado actual: ver con `/status`",
+                parse_mode="Markdown",
+            )
+            return
+
+        results = await event_bus.emit(Event(
+            name="system.set_trust",
+            data={"channel": channel, "enable": enable},
+            source="telegram",
+        ))
+
+        status = "activado" if enable else "desactivado"
+        icon = "🔓" if enable else "🔒"
+        warning = "\n\n⚠️ *CUIDADO*: El agente ejecutará comandos destructivos sin pedir confirmación." if enable else ""
+
+        await update.message.reply_text(
+            f"{icon} *Trust mode {status}*{warning}",
+            parse_mode="Markdown",
+        )
+        logger.info("telegram.trust_changed", chat_id=chat_id, enabled=enable)
+
+    # ── /model command ───────────────────────────────────────────
+
+    async def _cmd_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Muestra los modelos configurados y cómo cambiarlos."""
+        from config.settings import get_settings
+        s = get_settings()
+
+        lines = [
+            "🤖 *Modelos configurados*\n",
+            f"• **Default**: `{s.ollama_model}` (provider: {s.default_llm_provider})",
+            f"• **Visión**: `{s.ollama_vision_model}`",
+            f"• **Código**: `{s.ollama_coding_model}`",
+            f"• **Razonamiento**: `{s.ollama_reasoning_model}`",
+            f"• **OCR**: `{s.ollama_ocr_model}`",
+            f"• **Rápido**: `{s.ollama_fast_model}`",
+            "",
+            "_El agente elige automáticamente según la tarea._",
+            "Para cambiar: usá /config o edita `.env` directamente.",
+        ]
+
+        if self._is_admin(update.effective_chat.id):
+            keyboard = [[InlineKeyboardButton("⚙️ Cambiar modelos", callback_data="cfg:6")]]
+            await update.message.reply_text(
+                "\n".join(lines),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        else:
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
     # ── Message Handler ──────────────────────────────────────────
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -231,6 +571,11 @@ class TelegramBridge(PluginBase):
             user=user.username or user.first_name,
             text_length=len(text),
         )
+
+        # Verificar si estamos en el wizard /config (tiene prioridad)
+        if chat_id in self._config_sessions:
+            await self._cmd_config_value(chat_id, text)
+            return
 
         # Indicar que estamos procesando
         await update.message.chat.send_action("typing")
@@ -312,6 +657,142 @@ class TelegramBridge(PluginBase):
             except Exception:
                 await self._app.bot.send_message(chat_id=chat_id, text=chunk)
             await asyncio.sleep(0.3)  # Rate limiting
+
+    # ── Voice Handler ─────────────────────────────────────────────
+
+    async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Procesa mensajes de voz: transcribe y procesa como texto."""
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+
+        await update.message.chat.send_action("typing")
+
+        voice = update.message.voice or update.message.audio
+        if not voice:
+            await update.message.reply_text("⚠️ No pude procesar el audio.")
+            return
+
+        logger.info("telegram.voice_received", chat_id=chat_id, duration=getattr(voice, "duration", 0))
+
+        try:
+            # Descargar archivo de voz
+            voice_file = await context.bot.get_file(voice.file_id)
+            import io
+            buf = io.BytesIO()
+            await voice_file.download_to_memory(buf)
+            audio_bytes = buf.getvalue()
+
+            file_name = getattr(voice, "file_name", None) or "audio.ogg"
+
+            # Transcribir via AudioModule
+            results = await event_bus.emit(Event(
+                name="audio.transcribe",
+                data={
+                    "audio_bytes": audio_bytes,
+                    "file_name": file_name,
+                    "language": "es",
+                },
+                source="telegram",
+            ))
+
+            transcription_result = results[0] if results else None
+
+            if not transcription_result or not transcription_result.get("success"):
+                error = transcription_result.get("error", "desconocido") if transcription_result else "sin respuesta"
+                # Verificar si es un error de modelo no disponible
+                if "404" in str(error) or "not found" in str(error).lower() or "pull" in str(error).lower():
+                    await update.message.reply_text(
+                        "⚠️ El modelo Whisper no está instalado en Ollama.\n\n"
+                        "Para instalarlo ejecuta:\n"
+                        "`ollama pull whisper`\n\n"
+                        "O configura `AUDIO_TRANSCRIPTION_PROVIDER=openai` en .env",
+                        parse_mode="Markdown",
+                    )
+                else:
+                    await update.message.reply_text(f"❌ Error transcribiendo audio: {error}")
+                return
+
+            text = transcription_result["text"].strip()
+            if not text:
+                await update.message.reply_text("⚠️ No pude entender el audio. Intenta de nuevo.")
+                return
+
+            logger.info("telegram.voice_transcribed", chat_id=chat_id, text_len=len(text))
+
+            # Indicar al usuario qué se entendió
+            await update.message.reply_text(f'🎙️ Transcripción: "{text}"', parse_mode="HTML")
+
+            # Procesar el texto transcripto como si fuera un mensaje normal
+            task_results = await event_bus.emit(Event(
+                name="task.execute",
+                data={
+                    "instruction": text,
+                    "channel": f"telegram:{chat_id}",
+                },
+                source="telegram",
+            ))
+
+            if task_results and task_results[0]:
+                result = task_results[0]
+                response_text = result.response if result.success else f"❌ Error: {result.error}"
+            else:
+                response_text = "⚠️ No pude procesar tu mensaje. Intenta de nuevo."
+
+            await self._send_long_message(chat_id, response_text)
+
+        except Exception as exc:
+            logger.error("telegram.voice_error", error=str(exc), chat_id=chat_id)
+            await update.message.reply_text(f"❌ Error procesando audio: {str(exc)[:200]}")
+
+    # ── Photo Handler ─────────────────────────────────────────────
+
+    async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Procesa fotos e imágenes enviadas por el usuario."""
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+        caption = update.message.caption or ""
+
+        await update.message.chat.send_action("typing")
+
+        logger.info("telegram.photo_received", chat_id=chat_id, has_caption=bool(caption))
+
+        try:
+            # Obtener la foto en mayor resolución
+            photo = update.message.photo[-1]
+            photo_file = await context.bot.get_file(photo.file_id)
+
+            import io
+            import base64
+            buf = io.BytesIO()
+            await photo_file.download_to_memory(buf)
+            image_bytes = buf.getvalue()
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+            # Emitir evento para que el orchestrator procese la imagen
+            instruction = caption if caption else "Describe y analiza esta imagen en detalle."
+
+            task_results = await event_bus.emit(Event(
+                name="task.execute",
+                data={
+                    "instruction": instruction,
+                    "channel": f"telegram:{chat_id}",
+                    "image_b64": image_b64,
+                    "image_mime": "image/jpeg",
+                },
+                source="telegram",
+            ))
+
+            if task_results and task_results[0]:
+                result = task_results[0]
+                response_text = result.response if result.success else f"❌ Error: {result.error}"
+            else:
+                response_text = "⚠️ No pude analizar la imagen. Intenta de nuevo."
+
+            await self._send_long_message(chat_id, response_text)
+
+        except Exception as exc:
+            logger.error("telegram.photo_error", error=str(exc), chat_id=chat_id)
+            await update.message.reply_text(f"❌ Error procesando imagen: {str(exc)[:200]}")
 
     # ── Event Handler: enviar mensajes a Telegram desde otros módulos ─
 

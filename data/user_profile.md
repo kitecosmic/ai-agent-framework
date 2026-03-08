@@ -16,5 +16,11 @@
 - **Temperature Unit**: Celsius
 - **Date Format**: DD/MM/YYYY
 
+## Onboarding
+- **Nickname**:
+- **Interests**:
+- **Career**:
+- **News Interests**:
+
 ## Notes
 - (El agente puede agregar notas aquí con confirmación del usuario)

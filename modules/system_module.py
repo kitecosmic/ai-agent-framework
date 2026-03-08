@@ -257,6 +257,59 @@ class SystemModule(PluginBase):
         except Exception as exc:
             return {"success": False, "error": str(exc), "path": str(path)}
 
+    @hook("system.file_delete")
+    async def file_delete(self, event: Event) -> dict[str, Any]:
+        """
+        Elimina un archivo o directorio.
+
+        REQUIERE confirmed=True para ejecutar — el orchestrator se encarga
+        de pedir confirmación explícita al usuario antes de pasar este flag.
+        Esto protege contra prompt injection: la confirmación viene del usuario real,
+        no del LLM.
+
+        Data: {"path": "/ruta/al/archivo", "confirmed": true}
+        """
+        file_path = event.data.get("path", "")
+        confirmed = event.data.get("confirmed", False)
+
+        if not file_path:
+            return {"success": False, "error": "Path vacío"}
+
+        path = Path(os.path.expanduser(file_path)).resolve()
+
+        if not self._is_path_allowed(path):
+            return {"success": False, "error": f"Path no permitido: {file_path}"}
+
+        if not path.exists():
+            return {"success": False, "error": f"No existe: {file_path}"}
+
+        if not confirmed:
+            # Retornar info para que el orchestrator muestre la confirmación al usuario
+            return {
+                "success": False,
+                "requires_confirmation": True,
+                "path": str(path),
+                "is_dir": path.is_dir(),
+                "error": "Requiere confirmación del usuario",
+            }
+
+        try:
+            if path.is_file():
+                path.unlink()
+                action = "file_deleted"
+            elif path.is_dir():
+                import shutil as _shutil
+                _shutil.rmtree(str(path))
+                action = "dir_deleted"
+            else:
+                return {"success": False, "error": f"No es archivo ni directorio: {file_path}"}
+
+            logger.warning("system.file_delete", path=str(path), action=action)
+            return {"success": True, "path": str(path), "action": action}
+
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "path": str(path)}
+
     # ── Package management ───────────────────────────────────────────
 
     @hook("system.pip_install")

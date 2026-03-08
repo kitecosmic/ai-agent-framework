@@ -31,6 +31,26 @@ from core.plugin_base import PluginBase, hook
 logger = structlog.get_logger()
 
 
+# ── Onboarding ────────────────────────────────────────────────────────
+# Campos obligatorios para onboarding. Cada entrada: (section, field, pregunta)
+ONBOARDING_FIELDS = [
+    ("Onboarding", "Nickname", "¿Cómo te gustaría que te llame? (apodo o nombre preferido)"),
+    ("Onboarding", "Interests", "¿Qué temas te interesan? Ej: tecnología, IA, deportes, finanzas, música..."),
+    ("Onboarding", "Career", "¿Qué carrera estudiás o a qué te dedicás profesionalmente?"),
+    ("Onboarding", "News Interests", "¿Qué tipo de noticias te gustaría recibir? Ej: tech, IA, economía, deportes..."),
+]
+
+ONBOARDING_WELCOME = """¡Hola! Soy tu agente personal. Antes de empezar necesito conocerte mejor para darte una experiencia personalizada.
+
+Solo voy a hacerte {total} preguntas rápidas.
+
+{question}"""
+
+ONBOARDING_COMPLETE = """¡Listo! Ya tengo todo lo que necesito para ayudarte de forma personalizada.
+
+A partir de ahora funcionaré con todas mis capacidades. ¿En qué te puedo ayudar?"""
+
+
 # ── Prompt base (las secciones dinámicas se inyectan en runtime) ──────
 
 BASE_MODULES_PROMPT = """
@@ -95,14 +115,85 @@ Datos: {"path": "/home/user", "pattern": "*.py", "recursive": false}
 ### 13. system.pip_install (INSTALAR paquetes Python)
 Datos: {"package": "requests"}
 
-### 14. mcp.call_tool (HERRAMIENTAS MCP externas — Playwright avanzado, etc.)
+### 13b. system.file_delete (ELIMINAR archivos o directorios — REQUIERE CONFIRMACIÓN)
+Datos: {"path": "/ruta/al/archivo"}
+- IMPORTANTE: el sistema pedirá confirmación explícita al usuario antes de ejecutar
+- Nunca incluyas confirmed=true en el plan — el orchestrator lo maneja automáticamente
+- USAR PARA: eliminar archivos, directorios, limpiar datos
+
+### 14. mcp.call_tool (HERRAMIENTAS MCP externas — Playwright avanzado, Cloudflare, etc.)
 Datos: {"server": "playwright", "tool": "browser_navigate", "arguments": {"url": "https://..."}}
 - Conecta con servidores MCP configurados
 - Playwright MCP permite: navegar, click, screenshot, llenar formularios, extraer datos
+- Cloudflare MCP permite: crear subdominios, gestionar DNS, workers, páginas
+- USAR PARA crear subdominios: {"server": "cloudflare", "tool": "...", "arguments": {...}}
 - USAR CUANDO browser.search no es suficiente y necesitás interactuar con una página
 
 ### 15. mcp.list_tools (VER herramientas MCP disponibles)
 Datos: {}
+
+### 16. rapibase.select (CONSULTAR/LEER datos de RapiBase)
+Datos: {"table": "nombre_tabla", "filter": "campo:op:valor", "page": 1, "page_size": 50, "order_by": "campo", "order_dir": "asc"}
+- Todos los parámetros excepto "table" son opcionales
+- filter sintaxis: "campo:op:valor" donde op es: eq, ne, gt, lt, gte, lte, like
+- Ejemplos de filter: "status:eq:active" | "age:gte:18" | "name:like:Joel"
+- USAR PARA: leer registros, buscar datos, listar entradas con o sin filtros
+
+### 17. rapibase.insert (INSERTAR un registro nuevo)
+Datos: {"table": "nombre_tabla", "data": {"campo": "valor", "campo2": "valor2"}}
+- Crea un nuevo registro en la tabla
+- USAR PARA: crear nuevos registros, agregar datos
+
+### 18. rapibase.update (ACTUALIZAR un registro por ID)
+Datos: {"table": "nombre_tabla", "id": "uuid-del-registro", "data": {"campo": "nuevo_valor"}}
+- Actualiza el registro con el ID especificado
+- USAR PARA: modificar datos existentes (necesitás el ID del registro)
+
+### 19. rapibase.delete (ELIMINAR un registro por ID)
+Datos: {"table": "nombre_tabla", "id": "uuid-del-registro"}
+- Elimina el registro con el ID especificado
+- USAR PARA: borrar un registro específico
+
+### 20. rapibase.auth_signup (REGISTRAR un nuevo usuario)
+Datos: {"email": "user@example.com", "password": "pass123", "metadata": {"name": "Joel"}}
+- Registra un nuevo usuario en RapiBase Auth
+- Usa Anon Key automáticamente (acceso público)
+- USAR PARA: crear cuentas de usuario en la app
+
+### 21. rapibase.auth_signin (INICIAR SESIÓN de usuario)
+Datos: {"email": "user@example.com", "password": "pass123"}
+- Autentica al usuario y retorna JWT token
+- USAR PARA: login de usuarios, obtener token para operaciones autenticadas
+
+### 22. rapibase.auth_magic_link (ENVIAR magic link por email)
+Datos: {"email": "user@example.com"}
+- Envía un link de acceso sin contraseña al email del usuario
+- USAR PARA: autenticación passwordless
+
+### 23. rapibase.auth_forgot_password (RECUPERAR contraseña)
+Datos: {"email": "user@example.com"}
+- Envía email de recuperación de contraseña
+- USAR PARA: recuperar acceso cuando el usuario olvidó su contraseña
+
+### 24. rapibase.auth_reset_password (RESETEAR contraseña con token)
+Datos: {"token": "token-del-email", "new_password": "nueva_pass"}
+- Cambia la contraseña usando el token del email de recuperación
+- USAR PARA: completar el flujo de reset de contraseña
+
+### 25. rapibase.storage_list (LISTAR archivos en Storage)
+Datos: {"bucket": "nombre_bucket", "prefix": "carpeta/", "page": 1, "page_size": 50}
+- Lista archivos en un bucket de storage (prefix opcional para filtrar carpeta)
+- USAR PARA: ver archivos subidos, explorar storage
+
+### 26. rapibase.storage_delete (ELIMINAR archivo de Storage)
+Datos: {"bucket": "nombre_bucket", "path": "carpeta/archivo.jpg"}
+- Elimina un archivo del storage
+- USAR PARA: borrar archivos subidos
+
+### 27. rapibase.storage_search (BUSCAR archivos en Storage)
+Datos: {"bucket": "nombre_bucket", "query": "texto-a-buscar"}
+- Busca archivos por nombre en un bucket
+- USAR PARA: encontrar archivos específicos en el storage
 
 ## Reglas CRÍTICAS
 1. Para NOTICIAS, TENDENCIAS, RESÚMENES de actualidad: USA news.search (feeds RSS confiables y actuales)
@@ -119,6 +210,13 @@ Datos: {}
 12. Al programar tareas (scheduler.add_job), el campo "response" debe ser BREVE: solo confirma qué se programó, a qué hora y por qué canal. NO incluyas resúmenes anticipados ni datos inventados.
 13. Para tareas del SISTEMA (instalar, crear archivos, ejecutar comandos): USA system.exec / system.file_write / system.pip_install
 14. PLANIFICACIÓN REACTIVA: Después de cada step, evaluaré los resultados y te pediré decidir si necesitás más pasos. Planificá solo el primer paso necesario si no estás seguro del resultado.
+15. Para BASES DE DATOS (consultar, insertar, actualizar, eliminar): USA rapibase.select/insert/update/delete — filter sintaxis: "campo:op:valor" (op: eq, ne, gt, lt, gte, lte, like)
+    Para AUTH de usuarios en la app: USA rapibase.auth_signup/auth_signin/auth_magic_link/auth_forgot_password/auth_reset_password
+    Para STORAGE de archivos: USA rapibase.storage_list/storage_delete/storage_search
+16. Para crear SUBDOMINIOS o gestionar DNS en Cloudflare: USA mcp.call_tool con server="cloudflare"
+17. Para ELIMINAR archivos: USA system.file_delete (NO system.exec con rm) — el sistema pedirá confirmación al usuario automáticamente
+18. NUNCA incluyas confirmed=true en system.file_delete — el orchestrator se encarga de la confirmación
+19. Para BORRAR con rm (vía system.exec): el sistema también pedirá confirmación automática si no hay trust mode activo
 
 ## Formato OBLIGATORIO (un solo JSON)
 {"thinking": "análisis", "steps": [{"event": "...", "data": {...}, "description": "..."}], "response": "mensaje al usuario"}
@@ -151,6 +249,27 @@ Instalar paquete:
 
 Tarea programada (el chat_id se obtiene del contexto):
 {"thinking": "El usuario quiere un resumen diario a las 18hs", "steps": [{"event": "scheduler.add_job", "data": {"id": "daily_tech_trends", "name": "Tendencias tech diarias", "trigger_type": "cron", "trigger_args": {"hour": 18, "minute": 0}, "event_name": "task.execute", "event_data": {"instruction": "Usa news.search para buscar noticias recientes sobre inteligencia artificial, startups y tecnología. Haz un resumen en español con los puntos más importantes.", "chat_id": 1714121336, "channel": "telegram:1714121336"}}, "description": "Programar resumen diario a las 18hs"}], "response": "Listo, programé un resumen diario de tendencias tech para las 18:00 hs."}
+
+RapiBase — consultar con filtro:
+{"thinking": "El usuario quiere ver los usuarios activos", "steps": [{"event": "rapibase.select", "data": {"table": "users", "filter": "status:eq:active", "page": 1, "page_size": 20}, "description": "Listar usuarios activos"}], "response": "Consultando los usuarios activos..."}
+
+RapiBase — consultar sin filtro:
+{"thinking": "El usuario quiere ver todos los productos", "steps": [{"event": "rapibase.select", "data": {"table": "products"}, "description": "Listar todos los productos"}], "response": "Consultando productos..."}
+
+RapiBase — insertar registro:
+{"thinking": "El usuario quiere agregar un cliente", "steps": [{"event": "rapibase.insert", "data": {"table": "clients", "data": {"name": "Joel", "email": "joel@example.com", "plan": "pro"}}, "description": "Insertar nuevo cliente"}], "response": "Insertando el registro..."}
+
+RapiBase — actualizar registro:
+{"thinking": "El usuario quiere cambiar el plan del cliente con id abc123", "steps": [{"event": "rapibase.update", "data": {"table": "clients", "id": "abc123", "data": {"plan": "enterprise"}}, "description": "Actualizar plan del cliente"}], "response": "Actualizando el registro..."}
+
+RapiBase — eliminar registro:
+{"thinking": "El usuario quiere eliminar el producto con id xyz789", "steps": [{"event": "rapibase.delete", "data": {"table": "products", "id": "xyz789"}, "description": "Eliminar producto"}], "response": "Eliminando el registro..."}
+
+RapiBase — registrar usuario:
+{"thinking": "El usuario quiere crear una cuenta para alguien", "steps": [{"event": "rapibase.auth_signup", "data": {"email": "nuevo@example.com", "password": "pass123", "metadata": {"name": "Carlos"}}, "description": "Registrar nuevo usuario"}], "response": "Registrando el usuario..."}
+
+RapiBase — listar archivos en storage:
+{"thinking": "El usuario quiere ver los archivos subidos en el bucket avatars", "steps": [{"event": "rapibase.storage_list", "data": {"bucket": "avatars"}, "description": "Listar archivos en bucket avatars"}], "response": "Consultando el storage..."}
 """
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -181,6 +300,163 @@ class Orchestrator(PluginBase):
         self.llm = llm or llm_router
         self._conversation_history: dict[str, list[LLMMessage]] = {}  # channel -> messages
         self._pending_profile_updates: dict[str, dict] = {}  # channel -> pending update
+        self._onboarding_state: dict[str, str | None] = {}  # channel -> current field being asked
+        self._pending_confirmations: dict[str, dict] = {}  # channel -> {step, description, type}
+        self._trusted_channels: set[str] = set()  # channels con auto-approve activado
+
+    # ── Onboarding helpers ────────────────────────────────────────
+
+    def _get_missing_onboarding_fields(self) -> list[tuple[str, str, str]]:
+        """Retorna lista de (section, field, question) con campos de onboarding vacíos."""
+        content = self._load_profile("user_profile.md")
+        missing = []
+        for section, field, question in ONBOARDING_FIELDS:
+            # Buscar el campo en la línea exacta (no cruzar líneas)
+            import re
+            # Buscar "**Field**: valor" en la misma línea
+            # Usar [ \t]* para no cruzar líneas (no incluir \n en el match de espacio)
+            pattern = rf"^\s*-\s*\*\*{re.escape(field)}\*\*:[ \t]*([^\r\n]*)"
+            match = re.search(pattern, content, re.MULTILINE)
+            # Campo faltante si: no existe la línea, o el valor tras ":" está vacío
+            if not match or not match.group(1).strip():
+                missing.append((section, field, question))
+        return missing
+
+    async def _handle_onboarding(
+        self, instruction: str, channel: str
+    ) -> TaskResult | None:
+        """
+        Maneja el flujo de onboarding.
+        Retorna TaskResult si estamos en onboarding, None si ya está completo.
+        """
+        missing = self._get_missing_onboarding_fields()
+
+        if not missing:
+            # Onboarding completo — limpiar estado si había uno pendiente
+            if channel in self._onboarding_state:
+                del self._onboarding_state[channel]
+            return None
+
+        current_field = self._onboarding_state.get(channel)
+
+        # Si estábamos esperando respuesta para un campo, guardarla
+        if current_field and instruction.strip():
+            answer = instruction.strip()
+            # Encontrar el campo en ONBOARDING_FIELDS para saber la sección
+            for section, field, _ in ONBOARDING_FIELDS:
+                if field == current_field:
+                    self._update_profile_field(section, field, answer)
+                    logger.info("onboarding.field_saved", field=current_field, value=answer[:50])
+                    break
+
+            # Re-verificar campos faltantes después de guardar
+            missing = self._get_missing_onboarding_fields()
+            if not missing:
+                # ¡Onboarding completo!
+                del self._onboarding_state[channel]
+                return TaskResult(
+                    success=True,
+                    steps_completed=0,
+                    steps_total=0,
+                    response=ONBOARDING_COMPLETE,
+                )
+
+        # Hay campos faltantes → preguntar el primero
+        section, next_field, next_question = missing[0]
+        self._onboarding_state[channel] = next_field
+
+        total_remaining = len(missing)
+
+        if current_field is None and total_remaining == len(ONBOARDING_FIELDS):
+            # Primera vez — usar mensaje de bienvenida
+            response = ONBOARDING_WELCOME.format(
+                total=len(ONBOARDING_FIELDS),
+                question=next_question,
+            )
+        else:
+            remaining_str = f" (quedan {total_remaining})" if total_remaining > 1 else ""
+            response = f"{next_question}{remaining_str}"
+
+        return TaskResult(
+            success=True,
+            steps_completed=0,
+            steps_total=0,
+            response=response,
+        )
+
+    # ── Trust mode ───────────────────────────────────────────────
+
+    @hook("system.set_trust")
+    async def handle_set_trust(self, event: Event) -> dict:
+        """Activa o desactiva el modo de confianza para un canal."""
+        channel = event.data.get("channel", "")
+        enable = event.data.get("enable", True)
+        if enable:
+            self._trusted_channels.add(channel)
+        else:
+            self._trusted_channels.discard(channel)
+        return {"success": True, "trusted": enable, "channel": channel}
+
+    # ── Multi-model routing ───────────────────────────────────────
+
+    def _select_model_for_task(
+        self, instruction: str, has_image: bool = False
+    ) -> tuple[str | None, str | None]:
+        """
+        Selecciona el mejor modelo para la tarea.
+        Retorna (provider, model) o (None, None) para usar el default.
+        """
+        if not self.config.get("model_routing_enabled", True):
+            return (None, None)
+
+        inst = instruction.lower()
+
+        # Visión: imagen presente → modelo de visión dedicado
+        if has_image:
+            # Si pide extraer texto → OCR
+            if any(kw in inst for kw in ["texto", "dice", "escrito", "leer", "lee", "extrae"]):
+                m = self.config.get("ollama_ocr_model", "")
+                if m:
+                    return ("ollama", m)
+            m = self.config.get("ollama_vision_model", "")
+            if m:
+                return ("ollama", m)
+
+        # Código / programación
+        code_kws = [
+            "python", "javascript", "typescript", "rust", "golang", "java",
+            "código", "codigo", "script", "función", "funcion", "clase ", "class ",
+            "def ", "import ", "bug", "error en el código", "programa", "algoritmo",
+            "api", "endpoint", "refactori", "test", "testing", "deploy", "docker",
+            "crea una app", "crea un script", "crea una api",
+        ]
+        if any(kw in inst for kw in code_kws):
+            m = self.config.get("ollama_coding_model", "")
+            if m:
+                return ("ollama", m)
+
+        # Razonamiento profundo
+        think_kws = [
+            "analiza en detalle", "analiza a fondo", "razona", "razonamiento",
+            "explica en detalle", "explica a fondo", "piensa paso a paso",
+            "step by step", "filosofía", "debate", "pros y contras",
+            "ventajas y desventajas", "qué pasaría si", "hipotéticamente",
+            "por qué exactamente", "explica el porqué", "profundiza",
+        ]
+        if any(kw in inst for kw in think_kws):
+            m = self.config.get("ollama_reasoning_model", "")
+            if m:
+                return ("ollama", m)
+
+        # Respuesta rápida: mensaje muy corto y simple
+        stripped = instruction.strip()
+        simple_kws = ["hola", "hello", "hi", "gracias", "ok", "okey", "dale", "perfecto", "jaja"]
+        if len(stripped) < 60 and any(stripped.lower().startswith(kw) for kw in simple_kws):
+            m = self.config.get("ollama_fast_model", "")
+            if m:
+                return ("ollama", m)
+
+        return (None, None)
 
     # ── Profile & Context helpers ─────────────────────────────────
 
@@ -236,6 +512,30 @@ class Orchestrator(PluginBase):
         if updated:
             path.write_text("\n".join(new_lines), encoding="utf-8")
         return updated
+
+    def _build_image_message(self, text: str, image_b64: str, mime: str) -> str:
+        """
+        Construye un mensaje con imagen para el LLM.
+        Para Anthropic/Claude: formato de content blocks serializado como JSON string.
+        Para otros providers que no soporten vision, devuelve solo el texto.
+        """
+        import json
+        # Serializar como JSON para que AnthropicProvider pueda detectarlo
+        content_blocks = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": image_b64,
+                },
+            },
+            {
+                "type": "text",
+                "text": text or "Describe y analiza esta imagen en detalle.",
+            },
+        ]
+        return f"__IMAGE_CONTENT__:{json.dumps(content_blocks)}"
 
     def _build_system_prompt(self, channel: str = "default") -> str:
         """Construye el system prompt dinámicamente con contexto en tiempo real."""
@@ -315,8 +615,16 @@ class Orchestrator(PluginBase):
             source=event.source,
         )
 
+        image_b64 = event.data.get("image_b64")
+        image_mime = event.data.get("image_mime", "image/jpeg")
+
         try:
-            result = await self.process_task(instruction, channel=channel)
+            result = await self.process_task(
+                instruction,
+                channel=channel,
+                image_b64=image_b64,
+                image_mime=image_mime,
+            )
         except Exception as exc:
             logger.error("orchestrator.handle_task_error", error=str(exc), chat_id=chat_id)
             result = TaskResult(
@@ -341,18 +649,68 @@ class Orchestrator(PluginBase):
 
         return result
 
-    async def process_task(self, instruction: str, channel: str = "default") -> TaskResult:
+    async def process_task(
+        self,
+        instruction: str,
+        channel: str = "default",
+        image_b64: str | None = None,
+        image_mime: str = "image/jpeg",
+    ) -> TaskResult:
         """
         Proceso principal:
         1. Envía instrucción al LLM para planificar
         2. Ejecuta cada paso del plan
         3. Compone respuesta final
         """
+        # ── Onboarding check (antes de cualquier procesamiento) ──
+        onboarding_result = await self._handle_onboarding(instruction, channel)
+        if onboarding_result is not None:
+            return onboarding_result
+
         # Obtener o crear historial de conversación
         if channel not in self._conversation_history:
             self._conversation_history[channel] = []
 
         history = self._conversation_history[channel]
+
+        # ── Confirmación pendiente (operaciones peligrosas) ──────────
+        if channel in self._pending_confirmations:
+            pending = self._pending_confirmations[channel]
+            answer = instruction.strip().lower()
+            confirm_words = {"confirmar", "confirm", "sí", "si", "yes", "ok", "dale", "procede", "hazlo"}
+            cancel_words = {"no", "cancelar", "cancel", "nah", "nel", "no gracias"}
+
+            if answer in confirm_words:
+                self._pending_confirmations.pop(channel)
+                step = pending["step"]
+                # Marcar como confirmado
+                if step.get("event") == "system.file_delete":
+                    step["data"]["confirmed"] = True
+                logger.warning(
+                    "orchestrator.dangerous_op_confirmed",
+                    channel=channel,
+                    step=step.get("event"),
+                    path=step.get("data", {}).get("path", step.get("data", {}).get("command", "?")),
+                )
+                step_result = await self._execute_step(step, 0, channel, instruction)
+                ok = step_result["ok"]
+                results = step_result["results"]
+                errors = step_result["errors"]
+                response = await self._summarize_for_user(instruction, results, errors, "")
+                return TaskResult(
+                    success=ok,
+                    steps_completed=1 if ok else 0,
+                    steps_total=1,
+                    results=results,
+                    response=response,
+                )
+            elif answer in cancel_words:
+                self._pending_confirmations.pop(channel)
+                msg = "❌ Operación cancelada."
+                return TaskResult(success=True, steps_completed=0, steps_total=0, response=msg)
+            else:
+                # Otro mensaje → descartar pendiente y continuar normal
+                self._pending_confirmations.pop(channel)
 
         # Verificar si el usuario confirma/rechaza un profile update pendiente
         if channel in self._pending_profile_updates:
@@ -379,15 +737,37 @@ class Orchestrator(PluginBase):
 
         # Construir mensajes para el LLM (prompt dinámico con perfiles + fecha/hora)
         system_prompt = self._build_system_prompt(channel=channel)
+
+        # Construir el mensaje del usuario (con imagen si corresponde)
+        if image_b64:
+            user_content = self._build_image_message(instruction, image_b64, image_mime)
+        else:
+            user_content = instruction
+
         messages = [
             LLMMessage(role="system", content=system_prompt),
             *history[-20:],  # Últimos 20 mensajes de contexto
-            LLMMessage(role="user", content=instruction),
+            LLMMessage(role="user", content=user_content),
         ]
+
+        # ── Seleccionar modelo óptimo para la tarea ───────────────────
+        routed_provider, routed_model = self._select_model_for_task(instruction, has_image=bool(image_b64))
+        if routed_model:
+            logger.info(
+                "orchestrator.model_routed",
+                model=routed_model,
+                provider=routed_provider,
+                instruction_preview=instruction[:60],
+            )
 
         try:
             # 1. Planificar con LLM (con retry si devuelve vacío)
-            llm_response = await self.llm.complete(messages, temperature=0.3)
+            llm_response = await self.llm.complete(
+                messages,
+                temperature=0.3,
+                provider=routed_provider,
+                model=routed_model,
+            )
             plan = self._parse_plan(llm_response.content)
 
             if not plan and not llm_response.content.strip():
@@ -484,6 +864,12 @@ class Orchestrator(PluginBase):
                     step_result = await self._execute_step(
                         step, i + total_steps, channel, instruction
                     )
+                    # Operación peligrosa pausada — pedir confirmación al usuario
+                    if step_result.get("confirmation_required"):
+                        response_text += step_result.get("confirmation_msg", "")
+                        # Interrumpir ejecución del plan hasta recibir confirmación
+                        steps = []
+                        break
                     if step_result["ok"]:
                         batch_results.extend(step_result["results"])
                     if step_result["errors"]:
@@ -579,6 +965,41 @@ class Orchestrator(PluginBase):
             event_name=event_name,
             description=description,
         )
+
+        # ── Seguridad: operaciones destructivas requieren confirmación ──
+        # (excepto si el canal tiene trust mode activo)
+        is_trusted = channel in self._trusted_channels
+        needs_confirmation = False
+
+        if not is_trusted:
+            if event_name == "system.file_delete":
+                needs_confirmation = True
+            elif event_name == "system.exec":
+                cmd = event_data.get("command", "").lower()
+                # Detectar comandos con rm que eliminen archivos específicos
+                if re.search(r'\brm\b', cmd) and not re.search(r'\brm\s+(-rf?|--recursive)\s+/', cmd):
+                    needs_confirmation = True
+
+        if needs_confirmation and not event_data.get("confirmed"):
+            path_or_cmd = event_data.get("path") or event_data.get("command", "?")
+            self._pending_confirmations[channel] = {
+                "step": {"event": event_name, "data": event_data, "description": description},
+                "path": path_or_cmd,
+            }
+            confirm_msg = (
+                f"\n\n⚠️ **Operación destructiva detectada**\n"
+                f"Acción: `{event_name}`\n"
+                f"Target: `{path_or_cmd}`\n\n"
+                f"Respondé **CONFIRMAR** para proceder o **no** para cancelar.\n"
+                f"_(Esta confirmación viene del sistema, no puede ser forzada por el modelo)_"
+            )
+            return {
+                "ok": False,
+                "results": [],
+                "errors": [],
+                "confirmation_required": True,
+                "confirmation_msg": confirm_msg,
+            }
 
         results = []
         errors = []

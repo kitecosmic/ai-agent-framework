@@ -234,10 +234,30 @@ class MCPModule(PluginBase):
 
         # Construir environment con PATH completo del sistema
         # systemd tiene PATH limitado, así que forzamos el PATH estándar completo
+        # Incluir paths de nvm (Node Version Manager) que es común en servidores
         env = {**os.environ, **env_vars}
         full_system_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+
+        # Detectar nvm paths automáticamente
+        nvm_dir = os.environ.get("NVM_DIR", os.path.expanduser("~/.nvm"))
+        nvm_node_bins = []
+        nvm_versions = os.path.join(nvm_dir, "versions", "node")
+        if os.path.isdir(nvm_versions):
+            # Buscar la versión más reciente de node en nvm
+            try:
+                versions = sorted(os.listdir(nvm_versions), reverse=True)
+                for v in versions:
+                    bin_path = os.path.join(nvm_versions, v, "bin")
+                    if os.path.isdir(bin_path):
+                        nvm_node_bins.append(bin_path)
+                        break  # Usar la más reciente
+            except OSError:
+                pass
+
+        nvm_extra = ":".join(nvm_node_bins)
         venv_path = env.get("PATH", "")
-        env["PATH"] = f"{venv_path}:{full_system_path}" if venv_path else full_system_path
+        parts = [p for p in [venv_path, nvm_extra, full_system_path] if p]
+        env["PATH"] = ":".join(parts)
 
         # Resolver path completo del comando usando el PATH ampliado
         resolved_command = shutil.which(command, path=env["PATH"])

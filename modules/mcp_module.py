@@ -56,34 +56,54 @@ class MCPServerConnection:
         self._read = None
         self._write = None
 
-    async def connect(self):
-        """Establece conexión con el servidor MCP."""
+    async def connect(self, timeout: int = 120):
+        """Establece conexión con el servidor MCP.
+
+        timeout: segundos máximos para la conexión inicial (npx puede descargar paquetes).
+        """
         if not MCP_AVAILABLE:
             raise RuntimeError("MCP SDK no instalado. Ejecutá: pip install mcp")
 
-        self._context_manager = stdio_client(self.params)
-        self._read, self._write = await self._context_manager.__aenter__()
+        logger.info("mcp.connecting", server=self.name, timeout=timeout)
 
-        self._session_cm = ClientSession(self._read, self._write)
-        self.session = await self._session_cm.__aenter__()
+        try:
+            self._context_manager = stdio_client(self.params)
+            self._read, self._write = await asyncio.wait_for(
+                self._context_manager.__aenter__(), timeout=timeout
+            )
 
-        await self.session.initialize()
+            self._session_cm = ClientSession(self._read, self._write)
+            self.session = await asyncio.wait_for(
+                self._session_cm.__aenter__(), timeout=30
+            )
 
-        # Descubrir herramientas
-        tools_result = await self.session.list_tools()
-        self.tools = []
-        for tool in tools_result.tools:
-            self.tools.append({
-                "name": tool.name,
-                "description": getattr(tool, "description", "") or "",
-                "input_schema": getattr(tool, "inputSchema", {}) or {},
-            })
+            await asyncio.wait_for(self.session.initialize(), timeout=30)
 
-        logger.info(
-            "mcp.server_connected",
-            server=self.name,
-            tools=[t["name"] for t in self.tools],
-        )
+            # Descubrir herramientas
+            tools_result = await asyncio.wait_for(
+                self.session.list_tools(), timeout=15
+            )
+            self.tools = []
+            for tool in tools_result.tools:
+                self.tools.append({
+                    "name": tool.name,
+                    "description": getattr(tool, "description", "") or "",
+                    "input_schema": getattr(tool, "inputSchema", {}) or {},
+                })
+
+            logger.info(
+                "mcp.server_connected",
+                server=self.name,
+                tools=[t["name"] for t in self.tools],
+            )
+        except asyncio.TimeoutError:
+            logger.error("mcp.connect_timeout", server=self.name, timeout=timeout)
+            await self.disconnect()
+            raise RuntimeError(f"Timeout conectando a MCP '{self.name}' ({timeout}s)")
+        except Exception as exc:
+            logger.error("mcp.connect_error", server=self.name, error=str(exc))
+            await self.disconnect()
+            raise
 
     async def call_tool(self, tool_name: str, arguments: dict) -> dict:
         """Ejecuta una herramienta en el servidor MCP."""
@@ -135,6 +155,7 @@ class MCPModule(PluginBase):
         super().__init__(*args, **kwargs)
         self._servers: dict[str, MCPServerConnection] = {}
         self._tool_registry: dict[str, tuple[str, str]] = {}  # tool_name -> (server_name, mcp_tool_name)
+        self._pending_configs: list[dict] = []  # Configs que fallaron al conectar (retry lazy)
 
     async def on_load(self):
         """Conecta a los servidores MCP configurados."""
@@ -154,6 +175,22 @@ class MCPModule(PluginBase):
                 await self._connect_server(server_cfg)
             except Exception as exc:
                 logger.error("mcp.server_connect_error", server=name, error=str(exc))
+                self._pending_configs.append(server_cfg)
+
+    async def _retry_pending(self):
+        """Reintenta conectar servidores que fallaron al inicio."""
+        if not self._pending_configs:
+            return
+        still_pending = []
+        for cfg in self._pending_configs:
+            name = cfg.get("name", "unknown")
+            try:
+                await self._connect_server(cfg)
+                logger.info("mcp.retry_connected", server=name)
+            except Exception as exc:
+                logger.debug("mcp.retry_failed", server=name, error=str(exc))
+                still_pending.append(cfg)
+        self._pending_configs = still_pending
 
     async def on_unload(self):
         """Desconecta todos los servidores MCP."""
@@ -221,6 +258,9 @@ class MCPModule(PluginBase):
         Data: {"server": "playwright", "tool": "browser_navigate", "arguments": {...}}
         O:    {"tool": "browser_navigate", "arguments": {...}}  (busca en todos los servers)
         """
+        # Reintentar servidores pendientes antes de buscar
+        await self._retry_pending()
+
         server_name = event.data.get("server", "")
         tool_name = event.data.get("tool", "")
         arguments = event.data.get("arguments", {})
@@ -258,6 +298,7 @@ class MCPModule(PluginBase):
     @hook("mcp.list_tools")
     async def handle_list_tools(self, event: Event) -> dict[str, Any]:
         """Lista todas las herramientas MCP disponibles."""
+        await self._retry_pending()
         all_tools = {}
         for name, server in self._servers.items():
             all_tools[name] = server.tools

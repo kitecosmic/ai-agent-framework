@@ -29,6 +29,9 @@ openai>=1.57.0
 # Telegram
 python-telegram-bot>=21.0
 
+# MCP (Model Context Protocol)
+mcp>=1.0.0
+
 # Utilities
 structlog>=24.4.0
 rich>=13.9.0

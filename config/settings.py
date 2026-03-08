@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     # ── Telegram ──────────────────────────────────────────
     telegram_bot_token: str = ""
 
+    # ── System Module ─────────────────────────────────────
+    system_allowed_root: str = "~"
+    system_command_timeout: int = 30
+    system_max_output: int = 10000
+
+    # ── MCP ────────────────────────────────────────────────
+    mcp_servers: str = ""  # JSON array of server configs
+
     # ── Plugins ──────────────────────────────────────────
     plugins_dir: str = "plugins"
     plugins_hot_reload: bool = True

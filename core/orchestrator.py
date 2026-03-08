@@ -75,6 +75,35 @@ Datos: {"url": "https://...", "selectors": {"titulo": "h1", "precio": ".price"}}
 Datos: {"id": "...", "name": "...", "trigger_type": "interval|cron|date", "trigger_args": {...}, "event_name": "task.execute", "event_data": {"instruction": "la tarea a ejecutar", "chat_id": CHAT_ID, "channel": "telegram:CHAT_ID"}}
 IMPORTANTE: event_name SIEMPRE debe ser "task.execute" y event_data debe incluir "instruction" (qué hacer), "chat_id" (del usuario) y "channel".
 
+### 9. system.exec (EJECUTAR COMANDOS del sistema)
+Datos: {"command": "ls -la /home", "cwd": "/home", "timeout": 30}
+- Ejecuta comandos shell en el servidor
+- Retorna stdout, stderr, exit_code
+- Comandos peligrosos (rm -rf /, reboot, etc.) están BLOQUEADOS
+- USAR PARA: instalar paquetes, verificar estado del sistema, ejecutar scripts
+
+### 10. system.file_read (LEER archivos)
+Datos: {"path": "/home/user/config.json"}
+
+### 11. system.file_write (CREAR/ESCRIBIR archivos)
+Datos: {"path": "/home/user/script.py", "content": "print('hola')", "append": false}
+- append=true agrega al final sin borrar
+
+### 12. system.file_list (LISTAR archivos en directorio)
+Datos: {"path": "/home/user", "pattern": "*.py", "recursive": false}
+
+### 13. system.pip_install (INSTALAR paquetes Python)
+Datos: {"package": "requests"}
+
+### 14. mcp.call_tool (HERRAMIENTAS MCP externas — Playwright avanzado, etc.)
+Datos: {"server": "playwright", "tool": "browser_navigate", "arguments": {"url": "https://..."}}
+- Conecta con servidores MCP configurados
+- Playwright MCP permite: navegar, click, screenshot, llenar formularios, extraer datos
+- USAR CUANDO browser.search no es suficiente y necesitás interactuar con una página
+
+### 15. mcp.list_tools (VER herramientas MCP disponibles)
+Datos: {}
+
 ## Reglas CRÍTICAS
 1. Para NOTICIAS, TENDENCIAS, RESÚMENES de actualidad: USA news.search (feeds RSS confiables y actuales)
 2. Para CLIMA, TEMPERATURA, PRONÓSTICO: USA weather.current o weather.forecast (NUNCA http.request a wttr.in)
@@ -88,6 +117,8 @@ IMPORTANTE: event_name SIEMPRE debe ser "task.execute" y event_data debe incluir
 10. Responde SOLO JSON válido, sin markdown, sin texto extra
 11. Si detectas info personal nueva del usuario, incluye "profile_update"
 12. Al programar tareas (scheduler.add_job), el campo "response" debe ser BREVE: solo confirma qué se programó, a qué hora y por qué canal. NO incluyas resúmenes anticipados ni datos inventados.
+13. Para tareas del SISTEMA (instalar, crear archivos, ejecutar comandos): USA system.exec / system.file_write / system.pip_install
+14. PLANIFICACIÓN REACTIVA: Después de cada step, evaluaré los resultados y te pediré decidir si necesitás más pasos. Planificá solo el primer paso necesario si no estás seguro del resultado.
 
 ## Formato OBLIGATORIO (un solo JSON)
 {"thinking": "análisis", "steps": [{"event": "...", "data": {...}, "description": "..."}], "response": "mensaje al usuario"}
@@ -108,6 +139,15 @@ Saludo:
 
 Profile update:
 {"thinking": "El usuario me dice su nombre", "steps": [], "response": "¡Encantado Joel!", "profile_update": {"field": "Name", "value": "Joel", "section": "Personal"}}
+
+Ejecutar comando:
+{"thinking": "El usuario quiere ver el espacio en disco", "steps": [{"event": "system.exec", "data": {"command": "df -h"}, "description": "Ver espacio en disco"}], "response": "Revisando..."}
+
+Crear archivo:
+{"thinking": "El usuario quiere crear un script", "steps": [{"event": "system.file_write", "data": {"path": "/home/user/hello.py", "content": "print('Hola mundo!')"}, "description": "Crear script Python"}], "response": "Creando archivo..."}
+
+Instalar paquete:
+{"thinking": "Necesito instalar requests para hacer HTTP", "steps": [{"event": "system.pip_install", "data": {"package": "requests"}, "description": "Instalar requests"}], "response": "Instalando..."}
 
 Tarea programada (el chat_id se obtiene del contexto):
 {"thinking": "El usuario quiere un resumen diario a las 18hs", "steps": [{"event": "scheduler.add_job", "data": {"id": "daily_tech_trends", "name": "Tendencias tech diarias", "trigger_type": "cron", "trigger_args": {"hour": 18, "minute": 0}, "event_name": "task.execute", "event_data": {"instruction": "Usa news.search para buscar noticias recientes sobre inteligencia artificial, startups y tecnología. Haz un resumen en español con los puntos más importantes.", "chat_id": 1714121336, "channel": "telegram:1714121336"}}, "description": "Programar resumen diario a las 18hs"}], "response": "Listo, programé un resumen diario de tendencias tech para las 18:00 hs."}
@@ -425,138 +465,56 @@ class Orchestrator(PluginBase):
                 thinking=thinking[:100],
             )
 
-            # 2. Ejecutar pasos
-            results = []
-            errors = []
-            for i, step in enumerate(steps):
-                event_name = step.get("event", "")
-                event_data = step.get("data", {})
-                description = step.get("description", "")
+            # 2. Ejecutar pasos con planificación reactiva
+            #    - Ejecuta los steps iniciales
+            #    - Después de cada batch, el LLM evalúa resultados y decide si necesita más pasos
+            #    - Máximo MAX_REACTIVE_ITERATIONS iteraciones para evitar loops infinitos
+            MAX_REACTIVE_ITERATIONS = 8
+            all_results = []
+            all_errors = []
+            total_steps = 0
+            iteration = 0
 
-                # Forzar scheduler.add_job: event_name siempre task.execute + inyectar chat_id
-                if event_name == "scheduler.add_job":
-                    event_data["event_name"] = "task.execute"
-                    ed = event_data.get("event_data", {})
-                    if not ed.get("instruction"):
-                        ed["instruction"] = ed.get("query", description)
-                    # Inyectar chat_id del canal actual
-                    chat_id_from_channel = ""
-                    if channel.startswith("telegram:"):
-                        chat_id_from_channel = channel.split(":", 1)[1]
-                    if chat_id_from_channel:
-                        ed["chat_id"] = int(chat_id_from_channel)
-                        ed["channel"] = channel
-                    event_data["event_data"] = ed
-                    logger.info(
-                        "orchestrator.scheduler_fixed",
-                        job_id=event_data.get("id"),
-                        event_name_forced="task.execute",
-                        instruction=ed.get("instruction", "")[:80],
-                        chat_id=ed.get("chat_id"),
+            while steps and iteration < MAX_REACTIVE_ITERATIONS:
+                iteration += 1
+                batch_results = []
+                batch_errors = []
+
+                for i, step in enumerate(steps):
+                    step_result = await self._execute_step(
+                        step, i + total_steps, channel, instruction
                     )
+                    if step_result["ok"]:
+                        batch_results.extend(step_result["results"])
+                    if step_result["errors"]:
+                        batch_errors.extend(step_result["errors"])
 
-                logger.info(
-                    "orchestrator.step",
-                    step=i + 1,
-                    event_name=event_name,
-                    description=description,
-                )
+                total_steps += len(steps)
+                all_results.extend(batch_results)
+                all_errors.extend(batch_errors)
 
-                step_ok = False
-                try:
-                    step_results = await self.bus.emit(Event(
-                        name=event_name,
-                        data=event_data,
-                        source="orchestrator",
-                    ))
-                    for r in step_results:
-                        if r is not None:
-                            # Verificar si el resultado contiene error
-                            if hasattr(r, "error") and r.error:
-                                errors.append(f"Step {i+1} ({event_name}): {r.error}")
-                            else:
-                                results.append(r)
-                                step_ok = True
-                except Exception as exc:
-                    errors.append(f"Step {i+1} ({event_name}): {str(exc)}")
-
-                # Fallback: si http.request falló, reintentar con browser.search
-                if not step_ok and event_name == "http.request":
-                    query = event_data.get("url", "")
-                    # Extraer algo buscable de la URL (ej: wttr.in/Rosario → "clima Rosario")
-                    fallback_query = instruction  # Usar la pregunta original del usuario
-                    logger.info(
-                        "orchestrator.fallback_to_search",
-                        failed_event=event_name,
-                        failed_url=query,
-                        fallback_query=fallback_query,
+                # Planificación reactiva: preguntar al LLM si necesita más pasos
+                if iteration < MAX_REACTIVE_ITERATIONS:
+                    next_steps = await self._reactive_replan(
+                        instruction, steps, batch_results, batch_errors, system_prompt
                     )
-                    try:
-                        fallback_results = await self.bus.emit(Event(
-                            name="browser.search",
-                            data={"query": fallback_query},
-                            source="orchestrator",
-                        ))
-                        for r in fallback_results:
-                            if r is not None and not (hasattr(r, "error") and r.error):
-                                results.append(r)
-                                # Limpiar el error original ya que el fallback funcionó
-                                errors = [e for e in errors if f"Step {i+1}" not in e]
-                                logger.info("orchestrator.fallback_success", engine="browser.search")
-                    except Exception as fb_exc:
-                        logger.warning("orchestrator.fallback_failed", error=str(fb_exc))
+                    if next_steps:
+                        steps = next_steps
+                        logger.info(
+                            "orchestrator.reactive_replan",
+                            iteration=iteration,
+                            new_steps=len(next_steps),
+                        )
+                    else:
+                        break  # LLM decidió que no necesita más pasos
+                else:
+                    logger.warning("orchestrator.max_iterations", iterations=iteration)
+                    break
 
             # 3. Pedir al LLM que resuma los resultados (o errores)
-            has_results = results and any(r is not None for r in results)
-            has_errors = len(errors) > 0
-
-            if has_results or has_errors:
-                results_summary = self._summarize_results(results) if has_results else "(sin datos)"
-                error_summary = "\n".join(errors) if has_errors else ""
-
-                from datetime import datetime, timezone, timedelta
-                _now_ar = datetime.now(timezone(timedelta(hours=-3)))
-                _today_str = _now_ar.strftime("%A %d/%m/%Y").capitalize()
-
-                context_parts = [f"📅 Fecha y hora actual: {_today_str} {_now_ar.strftime('%H:%M')} (Argentina)"]
-                context_parts.append(f"Tarea original: {instruction}")
-                if has_results:
-                    context_parts.append(f"Datos obtenidos:\n{results_summary}")
-                if has_errors:
-                    context_parts.append(f"Errores en pasos:\n{error_summary}")
-
-                summary_messages = [
-                    LLMMessage(role="system", content=(
-                        "Eres un asistente útil. Tu tarea es transformar los datos crudos obtenidos en una "
-                        "respuesta clara, completa y bien formateada para el usuario en Telegram. "
-                        "REGLAS ESTRICTAS: "
-                        "1. SIEMPRE responde en ESPAÑOL (español de Argentina). "
-                        "2. USA los datos reales que se obtuvieron, NO inventes información. "
-                        "3. Organiza la información de forma legible con secciones si es necesario. "
-                        "4. Si los datos incluyen contenido de una página web, extrae lo más relevante y preséntalo de forma útil. "
-                        "5. Si hubo errores, NO le digas al usuario que busque él mismo. "
-                        "   En su lugar, usa tu conocimiento para dar la mejor respuesta posible. "
-                        "6. FORMATO para Telegram: "
-                        "   - Usá **negritas** para títulos y datos clave. "
-                        "   - Usá emojis con moderación para separar secciones y hacer visual: 🌡️ ☀️ 🌧️ 📰 🚀 💡 📊 etc. "
-                        "   - NO uses ### headers, ---, tablas markdown ni HTML. "
-                        "   - NO pongas disclaimers ni aclaraciones legales. "
-                        "   - Sé directo y conversacional, como un amigo que te cuenta las noticias/datos. "
-                        "7. Sé conciso pero informativo — incluye datos específicos, cifras, fechas, nombres. "
-                        "8. NUNCA sugieras al usuario buscar en Google u otro buscador — vos sos su buscador. "
-                        "9. NUNCA respondas en inglés. El idioma es ESPAÑOL siempre. "
-                        "10. Si los datos ya vienen formateados con emojis y estructura (ej: datos de clima o noticias), "
-                        "    usá esa estructura como base, no la reescribas desde cero. "
-                        "11. PRIORIZAR artículos marcados como (HOY) o (AYER). Ignorar artículos de hace semanas/meses si "
-                        "    el usuario pidió noticias 'del día de hoy' o 'actuales'."
-                    )),
-                    LLMMessage(role="user", content="\n\n".join(context_parts)),
-                ]
-                summary_response = await self.llm.complete(summary_messages, temperature=0.5)
-                response_text = re.sub(
-                    r"<think>.*?</think>", "", summary_response.content, flags=re.DOTALL
-                ).strip()
-                response_text = self._clean_response(response_text)
+            response_text = await self._summarize_for_user(
+                instruction, all_results, all_errors, response_text
+            )
 
             # Actualizar historial
             history.append(LLMMessage(role="user", content=instruction))
@@ -568,9 +526,9 @@ class Orchestrator(PluginBase):
 
             return TaskResult(
                 success=True,
-                steps_completed=len(steps),
-                steps_total=len(steps),
-                results=results,
+                steps_completed=total_steps,
+                steps_total=total_steps,
+                results=all_results,
                 response=response_text,
             )
 
@@ -583,6 +541,223 @@ class Orchestrator(PluginBase):
                 error=str(exc),
                 response=f"Error procesando la tarea: {str(exc)}",
             )
+
+    # ── Ejecución de steps y planificación reactiva ─────────────────
+
+    async def _execute_step(
+        self, step: dict, step_index: int, channel: str, instruction: str
+    ) -> dict:
+        """Ejecuta un step individual y retorna resultados + errores."""
+        event_name = step.get("event", "")
+        event_data = step.get("data", {})
+        description = step.get("description", "")
+
+        # Forzar scheduler.add_job: event_name siempre task.execute + inyectar chat_id
+        if event_name == "scheduler.add_job":
+            event_data["event_name"] = "task.execute"
+            ed = event_data.get("event_data", {})
+            if not ed.get("instruction"):
+                ed["instruction"] = ed.get("query", description)
+            chat_id_from_channel = ""
+            if channel.startswith("telegram:"):
+                chat_id_from_channel = channel.split(":", 1)[1]
+            if chat_id_from_channel:
+                ed["chat_id"] = int(chat_id_from_channel)
+                ed["channel"] = channel
+            event_data["event_data"] = ed
+            logger.info(
+                "orchestrator.scheduler_fixed",
+                job_id=event_data.get("id"),
+                event_name_forced="task.execute",
+                instruction=ed.get("instruction", "")[:80],
+                chat_id=ed.get("chat_id"),
+            )
+
+        logger.info(
+            "orchestrator.step",
+            step=step_index + 1,
+            event_name=event_name,
+            description=description,
+        )
+
+        results = []
+        errors = []
+        step_ok = False
+
+        try:
+            step_results = await self.bus.emit(Event(
+                name=event_name,
+                data=event_data,
+                source="orchestrator",
+            ))
+            for r in step_results:
+                if r is not None:
+                    if hasattr(r, "error") and r.error:
+                        errors.append(f"Step {step_index+1} ({event_name}): {r.error}")
+                    else:
+                        results.append(r)
+                        step_ok = True
+        except Exception as exc:
+            errors.append(f"Step {step_index+1} ({event_name}): {str(exc)}")
+
+        # Fallback: si http.request falló, reintentar con browser.search
+        if not step_ok and event_name == "http.request":
+            fallback_query = instruction
+            logger.info("orchestrator.fallback_to_search", failed_event=event_name)
+            try:
+                fallback_results = await self.bus.emit(Event(
+                    name="browser.search",
+                    data={"query": fallback_query},
+                    source="orchestrator",
+                ))
+                for r in fallback_results:
+                    if r is not None and not (hasattr(r, "error") and r.error):
+                        results.append(r)
+                        errors = [e for e in errors if f"Step {step_index+1}" not in e]
+                        step_ok = True
+                        logger.info("orchestrator.fallback_success", engine="browser.search")
+            except Exception as fb_exc:
+                logger.warning("orchestrator.fallback_failed", error=str(fb_exc))
+
+        return {"ok": step_ok, "results": results, "errors": errors}
+
+    async def _reactive_replan(
+        self,
+        instruction: str,
+        executed_steps: list[dict],
+        results: list,
+        errors: list[str],
+        system_prompt: str,
+    ) -> list[dict] | None:
+        """Después de ejecutar steps, pregunta al LLM si necesita más pasos.
+
+        Retorna lista de nuevos steps, o None si el LLM decide que terminó.
+        """
+        # Si no hubo resultados ni errores, no re-planificar
+        if not results and not errors:
+            return None
+
+        results_summary = self._summarize_results(results) if results else "(sin datos)"
+        error_summary = "\n".join(errors) if errors else ""
+
+        steps_desc = ", ".join(
+            f"{s.get('event', '?')}: {s.get('description', '')}" for s in executed_steps
+        )
+
+        replan_prompt = (
+            "Acabás de ejecutar estos pasos:\n"
+            f"  {steps_desc}\n\n"
+            f"Resultados obtenidos:\n{results_summary[:3000]}\n\n"
+        )
+        if error_summary:
+            replan_prompt += f"Errores:\n{error_summary}\n\n"
+
+        replan_prompt += (
+            f"Instrucción original del usuario: {instruction}\n\n"
+            "¿Necesitás ejecutar más pasos para cumplir la tarea? "
+            "Respondé SOLO con JSON:\n"
+            '- Si necesitás más pasos: {"next_steps": [{"event": "...", "data": {...}, "description": "..."}]}\n'
+            '- Si ya tenés toda la info: {"done": true}\n'
+            "SOLO JSON, sin texto extra."
+        )
+
+        try:
+            replan_msgs = [
+                LLMMessage(role="system", content=system_prompt),
+                LLMMessage(role="user", content=replan_prompt),
+            ]
+            resp = await self.llm.complete(replan_msgs, temperature=0.2)
+            clean = re.sub(r"<think>.*?</think>", "", resp.content, flags=re.DOTALL).strip()
+
+            # Extraer JSON
+            match = re.search(r'\{.*\}', clean, re.DOTALL)
+            if not match:
+                return None
+
+            try:
+                data = json.loads(match.group())
+            except json.JSONDecodeError:
+                data = self._try_repair_json(match.group())
+                if not data:
+                    return None
+
+            if data.get("done"):
+                return None
+
+            next_steps = data.get("next_steps", [])
+            if next_steps and isinstance(next_steps, list):
+                # Validar que cada step tiene al menos "event"
+                valid = [s for s in next_steps if isinstance(s, dict) and s.get("event")]
+                return valid if valid else None
+
+            return None
+        except Exception as exc:
+            logger.debug("orchestrator.replan_error", error=str(exc))
+            return None
+
+    async def _summarize_for_user(
+        self,
+        instruction: str,
+        results: list,
+        errors: list[str],
+        fallback_response: str,
+    ) -> str:
+        """Pide al LLM que resuma los resultados obtenidos para el usuario."""
+        has_results = results and any(r is not None for r in results)
+        has_errors = len(errors) > 0
+
+        if not has_results and not has_errors:
+            return fallback_response
+
+        results_summary = self._summarize_results(results) if has_results else "(sin datos)"
+        error_summary = "\n".join(errors) if has_errors else ""
+
+        try:
+            tz = ZoneInfo("America/Argentina/Buenos_Aires")
+        except Exception:
+            tz = None
+        _now_ar = datetime.now(tz)
+        _today_str = _now_ar.strftime("%A %d/%m/%Y").capitalize()
+
+        context_parts = [f"📅 Fecha y hora actual: {_today_str} {_now_ar.strftime('%H:%M')} (Argentina)"]
+        context_parts.append(f"Tarea original: {instruction}")
+        if has_results:
+            context_parts.append(f"Datos obtenidos:\n{results_summary}")
+        if has_errors:
+            context_parts.append(f"Errores en pasos:\n{error_summary}")
+
+        summary_messages = [
+            LLMMessage(role="system", content=(
+                "Eres un asistente útil. Tu tarea es transformar los datos crudos obtenidos en una "
+                "respuesta clara, completa y bien formateada para el usuario en Telegram. "
+                "REGLAS ESTRICTAS: "
+                "1. SIEMPRE responde en ESPAÑOL (español de Argentina). "
+                "2. USA los datos reales que se obtuvieron, NO inventes información. "
+                "3. Organiza la información de forma legible con secciones si es necesario. "
+                "4. Si los datos incluyen contenido de una página web, extrae lo más relevante y preséntalo de forma útil. "
+                "5. Si hubo errores, NO le digas al usuario que busque él mismo. "
+                "   En su lugar, usa tu conocimiento para dar la mejor respuesta posible. "
+                "6. FORMATO para Telegram: "
+                "   - Usá **negritas** para títulos y datos clave. "
+                "   - Usá emojis con moderación para separar secciones y hacer visual: 🌡️ ☀️ 🌧️ 📰 🚀 💡 📊 etc. "
+                "   - NO uses ### headers, ---, tablas markdown ni HTML. "
+                "   - NO pongas disclaimers ni aclaraciones legales. "
+                "   - Sé directo y conversacional, como un amigo que te cuenta las noticias/datos. "
+                "7. Sé conciso pero informativo — incluye datos específicos, cifras, fechas, nombres. "
+                "8. NUNCA sugieras al usuario buscar en Google u otro buscador — vos sos su buscador. "
+                "9. NUNCA respondas en inglés. El idioma es ESPAÑOL siempre. "
+                "10. Si los datos ya vienen formateados con emojis y estructura (ej: datos de clima o noticias), "
+                "    usá esa estructura como base, no la reescribas desde cero. "
+                "11. PRIORIZAR artículos marcados como (HOY) o (AYER). Ignorar artículos de hace semanas/meses si "
+                "    el usuario pidió noticias 'del día de hoy' o 'actuales'."
+            )),
+            LLMMessage(role="user", content="\n\n".join(context_parts)),
+        ]
+        summary_response = await self.llm.complete(summary_messages, temperature=0.5)
+        response_text = re.sub(
+            r"<think>.*?</think>", "", summary_response.content, flags=re.DOTALL
+        ).strip()
+        return self._clean_response(response_text)
 
     # ── Fallback cuando el LLM devuelve vacío ──────────────────────
 

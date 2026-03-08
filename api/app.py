@@ -45,6 +45,8 @@ from modules.messaging_bridge import MessagingBridge
 from modules.memory_module import MemoryModule
 from modules.multi_tenancy import MultiTenancyModule
 from modules.telegram_bridge import TelegramBridge
+from modules.system_module import SystemModule
+from modules.mcp_module import MCPModule
 
 logger = structlog.get_logger()
 
@@ -96,6 +98,8 @@ async def lifespan(app: FastAPI):
     await registry.register(SchedulerModule, config)
     await registry.register(MessagingBridge, config)
     await registry.register(TelegramBridge, config)
+    await registry.register(SystemModule, config)
+    await registry.register(MCPModule, config)
     await registry.register(Orchestrator, config)
 
     # 2.5 Agregar middleware de rate limiting

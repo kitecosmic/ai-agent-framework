@@ -47,7 +47,7 @@ Wants=ollama.service
 Type=simple
 User=root
 WorkingDirectory=${WORKDIR}
-Environment=PATH=${WORKDIR}/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=${WORKDIR}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 EnvironmentFile=${WORKDIR}/.env
 ExecStart=${WORKDIR}/venv/bin/python main.py
 Restart=always

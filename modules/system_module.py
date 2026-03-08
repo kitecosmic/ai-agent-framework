@@ -74,7 +74,7 @@ class SystemModule(PluginBase):
         super().__init__(*args, **kwargs)
         # Directorio raíz permitido (por defecto: home del usuario)
         self._allowed_root = Path(
-            self.config.get("system_allowed_root", os.path.expanduser("~"))
+            os.path.expanduser(self.config.get("system_allowed_root", "~"))
         ).resolve()
         self._command_timeout = int(self.config.get("system_command_timeout", 30))
         self._max_output = int(self.config.get("system_max_output", 10000))

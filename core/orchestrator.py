@@ -96,21 +96,24 @@ Datos: {"id": "...", "name": "...", "trigger_type": "interval|cron|date", "trigg
 IMPORTANTE: event_name SIEMPRE debe ser "task.execute" y event_data debe incluir "instruction" (qué hacer), "chat_id" (del usuario) y "channel".
 
 ### 9. system.exec (EJECUTAR COMANDOS del sistema)
-Datos: {"command": "ls -la /home", "cwd": "/home", "timeout": 30}
+Datos: {"command": "ls -la ~", "cwd": "~", "timeout": 30}
 - Ejecuta comandos shell en el servidor
 - Retorna stdout, stderr, exit_code
 - Comandos peligrosos (rm -rf /, reboot, etc.) están BLOQUEADOS
 - USAR PARA: instalar paquetes, verificar estado del sistema, ejecutar scripts
+- IMPORTANTE: usá el Home directory del Contexto Actual para paths, NUNCA inventes /home/user/
 
 ### 10. system.file_read (LEER archivos)
-Datos: {"path": "/home/user/config.json"}
+Datos: {"path": "~/config.json"}
+- Usá ~ o el home directory real del Contexto Actual
 
 ### 11. system.file_write (CREAR/ESCRIBIR archivos)
-Datos: {"path": "/home/user/script.py", "content": "print('hola')", "append": false}
+Datos: {"path": "~/script.py", "content": "print('hola')", "append": false}
 - append=true agrega al final sin borrar
+- SIEMPRE usá el home directory real o ~ como base, NUNCA /home/user/
 
 ### 12. system.file_list (LISTAR archivos en directorio)
-Datos: {"path": "/home/user", "pattern": "*.py", "recursive": false}
+Datos: {"path": "~", "pattern": "*.py", "recursive": false}
 
 ### 13. system.pip_install (INSTALAR paquetes Python)
 Datos: {"package": "requests"}
@@ -243,7 +246,7 @@ Ejecutar comando:
 {"thinking": "El usuario quiere ver el espacio en disco", "steps": [{"event": "system.exec", "data": {"command": "df -h"}, "description": "Ver espacio en disco"}], "response": "Revisando..."}
 
 Crear archivo:
-{"thinking": "El usuario quiere crear un script", "steps": [{"event": "system.file_write", "data": {"path": "/home/user/hello.py", "content": "print('Hola mundo!')"}, "description": "Crear script Python"}], "response": "Creando archivo..."}
+{"thinking": "El usuario quiere crear un script", "steps": [{"event": "system.file_write", "data": {"path": "~/hello.py", "content": "print('Hola mundo!')"}, "description": "Crear script Python"}], "response": "Creando archivo..."}
 
 Instalar paquete:
 {"thinking": "Necesito instalar requests para hacer HTTP", "steps": [{"event": "system.pip_install", "data": {"package": "requests"}, "description": "Instalar requests"}], "response": "Instalando..."}
@@ -566,6 +569,11 @@ class Orchestrator(PluginBase):
         datetime_str = now.strftime("%A %d/%m/%Y %H:%M")
         date_iso = now.strftime("%Y-%m-%d")
 
+        # Info del servidor
+        import platform
+        home_dir = str(Path.home())
+        project_dir = str(Path(__file__).resolve().parent.parent)
+
         # Extraer chat_id del canal si es Telegram
         chat_id = ""
         if channel.startswith("telegram:"):
@@ -574,6 +582,9 @@ class Orchestrator(PluginBase):
         parts = [
             "Eres NexusAgent, un agente AI. Responde SOLO con JSON válido, sin texto adicional.",
             f"\n## Contexto Actual\n- **Fecha y hora**: {datetime_str}\n- **Fecha ISO**: {date_iso}\n- **Timezone**: America/Argentina/Buenos_Aires (UTC-3)",
+            f"- **Servidor**: {platform.system()} {platform.release()}",
+            f"- **Home directory**: {home_dir} (USAR ESTE PATH para crear archivos del usuario, NUNCA /home/user/)",
+            f"- **Proyecto**: {project_dir}",
         ]
 
         if chat_id:

@@ -217,6 +217,11 @@ Datos: {"bucket": "nombre_bucket", "query": "texto-a-buscar"}
 16. Para BASES DE DATOS (consultar, insertar, actualizar, eliminar): USA rapibase.select/insert/update/delete — filter sintaxis: "campo:op:valor" (op: eq, ne, gt, lt, gte, lte, like)
     Para AUTH de usuarios en la app: USA rapibase.auth_signup/auth_signin/auth_magic_link/auth_forgot_password/auth_reset_password
     Para STORAGE de archivos: USA rapibase.storage_list/storage_delete/storage_search
+    INSTALAR RapiBase: es un proyecto open-source (github.com/kitecosmic/rapibase). Para instalarlo en el servidor:
+      1. git clone https://github.com/kitecosmic/rapibase.git ~/rapibase
+      2. cd ~/rapibase && docker compose up -d (requiere Docker)
+      3. Configurar RAPIBASE_URL=http://localhost:3500 y RAPIBASE_SERVICE_KEY en el .env del agente
+    Si RapiBase no está configurado, informar al usuario cómo instalarlo con estos pasos
 17. Para crear SUBDOMINIOS o gestionar DNS en Cloudflare: USA mcp.call_tool con server="cloudflare"
 18. Para ELIMINAR archivos: USA system.file_delete (NO system.exec con rm) — el sistema pedirá confirmación al usuario automáticamente
 19. NUNCA incluyas confirmed=true en system.file_delete — el orchestrator se encarga de la confirmación
@@ -798,7 +803,10 @@ class Orchestrator(PluginBase):
 
             if not plan and not llm_response.content.strip():
                 logger.info("orchestrator.llm_empty_retry", attempt=2)
-                llm_response = await self.llm.complete(messages, temperature=0.5)
+                llm_response = await self.llm.complete(
+                    messages, temperature=0.5,
+                    provider=routed_provider, model=routed_model,
+                )
                 plan = self._parse_plan(llm_response.content)
 
             clean = ""
@@ -946,12 +954,37 @@ class Orchestrator(PluginBase):
 
         except Exception as exc:
             logger.error("orchestrator.error", error=str(exc))
+            # Dar mensaje amigable según el tipo de error, NUNCA exponer detalles técnicos
+            err_str = str(exc).lower()
+            if "insufficient_balance" in err_str or "insufficient balance" in err_str:
+                friendly = (
+                    "\u26a0\ufe0f El servicio de inteligencia artificial no tiene saldo disponible. "
+                    "Contactá al administrador para recargar el balance."
+                )
+            elif "429" in err_str or "rate_limit" in err_str or "rate limit" in err_str:
+                friendly = (
+                    "\u23f3 El servicio está temporalmente saturado. "
+                    "Esperá unos segundos e intentá de nuevo."
+                )
+            elif "401" in err_str or "unauthorized" in err_str or "invalid.*key" in err_str:
+                friendly = (
+                    "\u26a0\ufe0f Hay un problema de autenticación con el servicio de IA. "
+                    "Contactá al administrador."
+                )
+            elif "timeout" in err_str or "timed out" in err_str:
+                friendly = (
+                    "\u23f3 La solicitud tardó demasiado. Intentá de nuevo o con una consulta más simple."
+                )
+            else:
+                friendly = (
+                    "\u274c Hubo un problema procesando tu solicitud. Intentá de nuevo en unos segundos."
+                )
             return TaskResult(
                 success=False,
                 steps_completed=0,
                 steps_total=0,
                 error=str(exc),
-                response=f"Error procesando la tarea: {str(exc)}",
+                response=friendly,
             )
 
     # ── Ejecución de steps y planificación reactiva ─────────────────

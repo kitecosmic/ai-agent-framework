@@ -263,7 +263,7 @@ class MinimaxProvider(LLMProvider):
     """Provider para MiniMax (compatible con OpenAI API)."""
     name = "minimax"
 
-    def __init__(self, api_key: str, default_model: str = "MiniMax-Text-01"):
+    def __init__(self, api_key: str, default_model: str = "MiniMax-M1-m-2.5"):
         from openai import AsyncOpenAI
         self.client = AsyncOpenAI(
             api_key=api_key,

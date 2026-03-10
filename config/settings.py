@@ -46,7 +46,7 @@ class Settings(BaseSettings):
 
     # ── MiniMax ──────────────────────────────────────────
     minimax_api_key: str = ""
-    minimax_model: str = "MiniMax-Text-01"
+    minimax_model: str = "MiniMax-M1-m-2.5"
 
     # ── Browser ──────────────────────────────────────────
     browser_headless: bool = True

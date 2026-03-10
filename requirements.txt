@@ -38,9 +38,18 @@ rich>=13.9.0
 watchfiles>=1.0.0
 jinja2>=3.1.0
 
-# Audio transcription (local, sin API key — recomendado para voz)
-# Modelos disponibles: tiny, base, small, medium, large-v3, turbo (recomendado)
-# Se descargan automáticamente de HuggingFace en el primer uso
+# Audio transcription — elige UNA opción:
+#
+# OPCIÓN 1: Con GPU NVIDIA (recomendado, local, sin API key)
+#   pip install faster-whisper>=1.1.0
+#   El modelo (turbo ~1.6GB) se descarga automáticamente de HuggingFace en el primer uso.
+#   CUDA se detecta automáticamente si el driver NVIDIA está instalado.
+#
+# OPCIÓN 2: Sin GPU (usa OpenAI Whisper API, requiere OPENAI_API_KEY en .env)
+#   Configurar en .env: AUDIO_TRANSCRIPTION_PROVIDER=openai
+#   No requiere instalar faster-whisper.
+#
+# Si faster-whisper está instalado, se usa como default con fallback a OpenAI.
 faster-whisper>=1.1.0
 
 # Testing

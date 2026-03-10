@@ -699,17 +699,7 @@ class TelegramBridge(PluginBase):
 
             if not transcription_result or not transcription_result.get("success"):
                 error = transcription_result.get("error", "desconocido") if transcription_result else "sin respuesta"
-                # Verificar si es un error de modelo no disponible
-                if "404" in str(error) or "not found" in str(error).lower() or "pull" in str(error).lower():
-                    await update.message.reply_text(
-                        "⚠️ El modelo Whisper no está instalado en Ollama.\n\n"
-                        "Para instalarlo ejecuta:\n"
-                        "`ollama pull whisper`\n\n"
-                        "O configura `AUDIO_TRANSCRIPTION_PROVIDER=openai` en .env",
-                        parse_mode="Markdown",
-                    )
-                else:
-                    await update.message.reply_text(f"❌ Error transcribiendo audio: {error}")
+                await update.message.reply_text(f"❌ Error transcribiendo audio: {error}")
                 return
 
             text = transcription_result["text"].strip()

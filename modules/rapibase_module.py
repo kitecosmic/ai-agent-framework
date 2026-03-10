@@ -116,10 +116,7 @@ class RapibaseModule(PluginBase):
     def _not_configured(self) -> dict[str, Any]:
         return {
             "success": False,
-            "error": (
-                "RapiBase no configurado. Agregá RAPIBASE_URL y RAPIBASE_SERVICE_KEY en .env\n"
-                "O usá /config en Telegram para configurarlo."
-            ),
+            "error": "Base de datos no disponible (RapiBase no configurado)",
         }
 
     async def _req(

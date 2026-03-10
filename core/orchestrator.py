@@ -206,17 +206,18 @@ Datos: {"bucket": "nombre_bucket", "query": "texto-a-buscar"}
 8. NUNCA le digas al usuario que busque él mismo — TÚ tienes las herramientas, ÚSALAS
 9. Si NO necesitas módulos, pon steps: [] y responde directamente
 10. Responde SOLO JSON válido, sin markdown, sin texto extra
-11. Si detectas info personal nueva del usuario, incluye "profile_update"
-12. Al programar tareas (scheduler.add_job), el campo "response" debe ser BREVE: solo confirma qué se programó, a qué hora y por qué canal. NO incluyas resúmenes anticipados ni datos inventados.
-13. Para tareas del SISTEMA (instalar, crear archivos, ejecutar comandos): USA system.exec / system.file_write / system.pip_install
-14. PLANIFICACIÓN REACTIVA: Después de cada step, evaluaré los resultados y te pediré decidir si necesitás más pasos. Planificá solo el primer paso necesario si no estás seguro del resultado.
-15. Para BASES DE DATOS (consultar, insertar, actualizar, eliminar): USA rapibase.select/insert/update/delete — filter sintaxis: "campo:op:valor" (op: eq, ne, gt, lt, gte, lte, like)
+11. NUNCA expongas errores técnicos internos al usuario (URLs, .env, API keys, configuración del servidor, nombres de módulos). Si un módulo no está disponible, respondé de forma amigable que esa función no está disponible ahora y ofrecé alternativas
+12. Si detectas info personal nueva del usuario, incluye "profile_update"
+13. Al programar tareas (scheduler.add_job), el campo "response" debe ser BREVE: solo confirma qué se programó, a qué hora y por qué canal. NO incluyas resúmenes anticipados ni datos inventados.
+14. Para tareas del SISTEMA (instalar, crear archivos, ejecutar comandos): USA system.exec / system.file_write / system.pip_install
+15. PLANIFICACIÓN REACTIVA: Después de cada step, evaluaré los resultados y te pediré decidir si necesitás más pasos. Planificá solo el primer paso necesario si no estás seguro del resultado.
+16. Para BASES DE DATOS (consultar, insertar, actualizar, eliminar): USA rapibase.select/insert/update/delete — filter sintaxis: "campo:op:valor" (op: eq, ne, gt, lt, gte, lte, like)
     Para AUTH de usuarios en la app: USA rapibase.auth_signup/auth_signin/auth_magic_link/auth_forgot_password/auth_reset_password
     Para STORAGE de archivos: USA rapibase.storage_list/storage_delete/storage_search
-16. Para crear SUBDOMINIOS o gestionar DNS en Cloudflare: USA mcp.call_tool con server="cloudflare"
-17. Para ELIMINAR archivos: USA system.file_delete (NO system.exec con rm) — el sistema pedirá confirmación al usuario automáticamente
-18. NUNCA incluyas confirmed=true en system.file_delete — el orchestrator se encarga de la confirmación
-19. Para BORRAR con rm (vía system.exec): el sistema también pedirá confirmación automática si no hay trust mode activo
+17. Para crear SUBDOMINIOS o gestionar DNS en Cloudflare: USA mcp.call_tool con server="cloudflare"
+18. Para ELIMINAR archivos: USA system.file_delete (NO system.exec con rm) — el sistema pedirá confirmación al usuario automáticamente
+19. NUNCA incluyas confirmed=true en system.file_delete — el orchestrator se encarga de la confirmación
+20. Para BORRAR con rm (vía system.exec): el sistema también pedirá confirmación automática si no hay trust mode activo
 
 ## Formato OBLIGATORIO (un solo JSON)
 {"thinking": "análisis", "steps": [{"event": "...", "data": {...}, "description": "..."}], "response": "mensaje al usuario"}
@@ -423,14 +424,23 @@ class Orchestrator(PluginBase):
                 return ("ollama", m)
 
         # Código / programación
-        code_kws = [
-            "python", "javascript", "typescript", "rust", "golang", "java",
-            "código", "codigo", "script", "función", "funcion", "clase ", "class ",
-            "def ", "import ", "bug", "error en el código", "programa", "algoritmo",
-            "api", "endpoint", "refactori", "test", "testing", "deploy", "docker",
+        # IMPORTANTE: usar keywords específicos para evitar falsos positivos
+        # (ej: "api" matchea "rápido", "programa" matchea "programar tareas")
+        code_kws_exact = [
+            "python", "javascript", "typescript", "rust", "golang",
+            "código", "codigo", "script", "función", "funcion",
+            "algoritmo", "endpoint", "refactori", "deploy", "docker",
             "crea una app", "crea un script", "crea una api",
+            "error en el código", "debugg", "debugue",
         ]
-        if any(kw in inst for kw in code_kws):
+        # Keywords que necesitan ser palabras completas (word boundary)
+        code_kws_word = [
+            "api", "bug", "class", "clase", "def", "import", "java",
+            "test", "testing", "programa",  # "programa" como sustantivo, no "programar"
+        ]
+        has_code_exact = any(kw in inst for kw in code_kws_exact)
+        has_code_word = any(re.search(rf'\b{re.escape(kw)}\b', inst) for kw in code_kws_word)
+        if has_code_exact or has_code_word:
             m = self.config.get("ollama_coding_model", "")
             if m:
                 return ("ollama", m)
@@ -448,10 +458,15 @@ class Orchestrator(PluginBase):
             if m:
                 return ("ollama", m)
 
-        # Respuesta rápida: mensaje muy corto y simple
+        # Respuesta rápida: SOLO para mensajes muy cortos y simples (saludos, confirmaciones)
+        # NO usar para preguntas reales, incluso si son cortas
         stripped = instruction.strip()
-        simple_kws = ["hola", "hello", "hi", "gracias", "ok", "okey", "dale", "perfecto", "jaja"]
-        if len(stripped) < 60 and any(stripped.lower().startswith(kw) for kw in simple_kws):
+        simple_kws = ["hola", "hello", "hi", "gracias", "ok", "okey", "dale", "perfecto", "jaja", "buenas"]
+        # Debe ser muy corto (<40 chars) Y empezar con keyword simple Y no contener signos de pregunta
+        if (len(stripped) < 40
+                and any(stripped.lower().startswith(kw) for kw in simple_kws)
+                and "?" not in stripped
+                and "¿" not in stripped):
             m = self.config.get("ollama_fast_model", "")
             if m:
                 return ("ollama", m)
@@ -1012,12 +1027,18 @@ class Orchestrator(PluginBase):
                 source="orchestrator",
             ))
             for r in step_results:
-                if r is not None:
-                    if hasattr(r, "error") and r.error:
-                        errors.append(f"Step {step_index+1} ({event_name}): {r.error}")
-                    else:
-                        results.append(r)
-                        step_ok = True
+                if r is None:
+                    continue
+                # Dict con success=False (ej: rapibase, audio, etc.)
+                if isinstance(r, dict) and r.get("success") is False:
+                    err = r.get("error", "operación falló")
+                    errors.append(f"Step {step_index+1} ({event_name}): {err}")
+                # Dataclass/objeto con .error
+                elif hasattr(r, "error") and r.error:
+                    errors.append(f"Step {step_index+1} ({event_name}): {r.error}")
+                else:
+                    results.append(r)
+                    step_ok = True
         except Exception as exc:
             errors.append(f"Step {step_index+1} ({event_name}): {str(exc)}")
 
@@ -1078,8 +1099,12 @@ class Orchestrator(PluginBase):
             "¿Necesitás ejecutar más pasos para cumplir la tarea? "
             "Respondé SOLO con JSON:\n"
             '- Si necesitás más pasos: {"next_steps": [{"event": "...", "data": {...}, "description": "..."}]}\n'
-            '- Si ya tenés toda la info: {"done": true}\n'
-            "SOLO JSON, sin texto extra."
+            '- Si ya tenés toda la info o el paso falló por configuración: {"done": true}\n'
+            "REGLAS:\n"
+            "- SOLO JSON, sin texto extra.\n"
+            "- Si un módulo falló por falta de configuración (ej: RapiBase no configurado, API key faltante), "
+            "respondé {\"done\": true}. NO intentes messaging.send ni pidas al usuario que configure .env.\n"
+            "- NO uses messaging.send para notificar al usuario — la respuesta llega automáticamente."
         )
 
         try:
@@ -1170,7 +1195,11 @@ class Orchestrator(PluginBase):
                 "10. Si los datos ya vienen formateados con emojis y estructura (ej: datos de clima o noticias), "
                 "    usá esa estructura como base, no la reescribas desde cero. "
                 "11. PRIORIZAR artículos marcados como (HOY) o (AYER). Ignorar artículos de hace semanas/meses si "
-                "    el usuario pidió noticias 'del día de hoy' o 'actuales'."
+                "    el usuario pidió noticias 'del día de hoy' o 'actuales'. "
+                "12. NUNCA menciones errores técnicos internos al usuario (URLs de servicios, .env, API keys, "
+                "    configuración del servidor, nombres de módulos internos). "
+                "    Si un servicio falló, decí algo como 'esa funcionalidad no está disponible ahora' "
+                "    y ofrecé una alternativa o solución creativa con lo que sí tengas."
             )),
             LLMMessage(role="user", content="\n\n".join(context_parts)),
         ]

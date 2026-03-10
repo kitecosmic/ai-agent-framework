@@ -124,16 +124,40 @@ class AudioModule(PluginBase):
     @staticmethod
     def _check_cuda() -> bool:
         """Verifica si CUDA está disponible (GPU NVIDIA)."""
+        # 1. ctranslate2 (viene con faster-whisper, más confiable para nuestro caso)
+        try:
+            import ctranslate2
+            supported = ctranslate2.get_supported_compute_types("cuda")
+            if supported:
+                logger.info("audio.cuda_detected", method="ctranslate2", compute_types=list(supported))
+                return True
+        except Exception:
+            pass
+
+        # 2. torch (si está instalado)
         try:
             import torch
-            return torch.cuda.is_available()
-        except ImportError:
-            # Sin torch, faster-whisper puede detectar CUDA por su cuenta via ctranslate2
-            try:
-                import ctranslate2
-                return "cuda" in ctranslate2.get_supported_compute_types("cuda")
-            except Exception:
-                return False
+            if torch.cuda.is_available():
+                logger.info("audio.cuda_detected", method="torch", device=torch.cuda.get_device_name(0))
+                return True
+        except Exception:
+            pass
+
+        # 3. nvidia-smi como último recurso
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                logger.info("audio.cuda_detected", method="nvidia-smi", gpu=result.stdout.strip().split("\n")[0])
+                return True
+        except Exception:
+            pass
+
+        logger.info("audio.cuda_not_detected")
+        return False
 
     async def on_unload(self):
         if self._client:

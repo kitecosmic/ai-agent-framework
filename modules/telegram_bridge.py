@@ -709,8 +709,8 @@ class TelegramBridge(PluginBase):
 
             logger.info("telegram.voice_transcribed", chat_id=chat_id, text_len=len(text))
 
-            # Indicar al usuario qué se entendió
-            await update.message.reply_text(f'🎙️ Transcripción: "{text}"', parse_mode="HTML")
+            # Mantener indicador de typing mientras el orchestrator procesa
+            await update.message.chat.send_action("typing")
 
             # Procesar el texto transcripto como si fuera un mensaje normal
             task_results = await event_bus.emit(Event(
@@ -728,7 +728,9 @@ class TelegramBridge(PluginBase):
             else:
                 response_text = "⚠️ No pude procesar tu mensaje. Intenta de nuevo."
 
-            await self._send_long_message(chat_id, response_text)
+            # Incluir transcripción como contexto sutil antes de la respuesta
+            full_response = f'🎙️ _"{text}"_\n\n{response_text}'
+            await self._send_long_message(chat_id, full_response)
 
         except Exception as exc:
             logger.error("telegram.voice_error", error=str(exc), chat_id=chat_id)
